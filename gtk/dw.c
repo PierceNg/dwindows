@@ -3,7 +3,7 @@
  *          A GTK like cross-platform GUI
  *          GTK forwarder module for portabilty.
  *
- * (C) 2000-2022 Brian Smith <brian@dbsoft.org>
+ * (C) 2000-2023 Brian Smith <brian@dbsoft.org>
  * (C) 2003-2021 Mark Hessling <mark@rexx.org>
  * (C) 2002 Nickolay V. Shmyrev <shmyrev@yandex.ru>
  */
@@ -11,12 +11,10 @@
 #include "dw.h"
 #include <string.h>
 #include <stdlib.h>
-#if !defined(GDK_WINDOWING_WIN32)
-# include <sys/utsname.h>
-# include <sys/socket.h>
-# include <sys/un.h>
-# include <sys/mman.h>
-#endif
+#include <sys/utsname.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/mman.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -135,6 +133,26 @@ static char _dw_app_id[_DW_APP_ID_SIZE+1] = { 0 };
 #endif
 char *_DWDefaultFont = NULL;
 static char _dw_share_path[PATH_MAX+1] = { 0 };
+static int _dw_render_safe_mode = DW_FEATURE_DISABLED;
+
+/* Return TRUE if it is safe to draw on the window handle.
+ * Either we are in unsafe mode, or we are in an EXPOSE
+ * event for the requested render window handle.
+ */
+int _dw_render_safe_check(GtkWidget *handle)
+{
+    if(_dw_render_safe_mode == DW_FEATURE_DISABLED || 
+       (handle && gtk_object_get_data(GTK_OBJECT(handle), "_dw_expose")))
+           return TRUE;
+    return FALSE;
+}
+
+int _dw_is_render(GtkWidget *handle)
+{
+   if(GTK_IS_DRAWING_AREA(handle))
+       return TRUE;
+   return FALSE;
+}
 
 #if GTK_MAJOR_VERSION < 2
 static int _dw_file_active = 0;
@@ -1464,12 +1482,20 @@ static gint _dw_expose_event(GtkWidget *widget, GdkEventExpose *event, gpointer 
    {
       DWExpose exp;
       int (*exposefunc)(HWND, DWExpose *, void *) = work.func;
+      gpointer oldrender = NULL;
 
       exp.x = event->area.x;
       exp.y = event->area.y;
       exp.width = event->area.width;
       exp.height = event->area.height;
+      if(_dw_render_safe_mode == DW_FEATURE_ENABLED && _dw_is_render(work.window))
+      {
+      	oldrender = gtk_object_get_data(GTK_OBJECT(work.window), "_dw_expose");
+      	gtk_object_set_data(GTK_OBJECT(work.window), "_dw_expose", (gpointer)1);
+      }
       retval = exposefunc(work.window, &exp, work.data);
+      if(_dw_render_safe_mode == DW_FEATURE_ENABLED)
+      	gtk_object_set_data(GTK_OBJECT(work.window), "_dw_expose", oldrender);
    }
    return retval;
 }
@@ -8562,7 +8588,7 @@ void dw_draw_point(HWND handle, HPIXMAP pixmap, int x, int y)
 #endif
 
    DW_MUTEX_LOCK;
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
       gc = _dw_set_colors(handle->window);
    else if(pixmap && pixmap->pixmap)
       gc = _dw_set_colors(pixmap->pixmap);
@@ -8606,7 +8632,7 @@ void dw_draw_line(HWND handle, HPIXMAP pixmap, int x1, int y1, int x2, int y2)
 #endif
 
    DW_MUTEX_LOCK;
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
       gc = _dw_set_colors(handle->window);
    else if(pixmap && pixmap->pixmap)
       gc = _dw_set_colors(pixmap->pixmap);
@@ -8653,7 +8679,7 @@ void dw_draw_polygon(HWND handle, HPIXMAP pixmap, int flags, int npoints, int *x
 #endif
 
    DW_MUTEX_LOCK;
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
       gc = _dw_set_colors(handle->window);
    else if(pixmap && pixmap->pixmap)
       gc = _dw_set_colors(pixmap->pixmap);
@@ -8717,7 +8743,7 @@ void dw_draw_rect(HWND handle, HPIXMAP pixmap, int flags, int x, int y, int widt
 #endif
 
    DW_MUTEX_LOCK;
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
       gc = _dw_set_colors(handle->window);
    else if(pixmap && pixmap->pixmap)
       gc = _dw_set_colors(pixmap->pixmap);
@@ -8778,7 +8804,7 @@ void API dw_draw_arc(HWND handle, HPIXMAP pixmap, int flags, int xorigin, int yo
    int height = width;
 
    DW_MUTEX_LOCK;
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
       gc = _dw_set_colors(handle->window);
    else if(pixmap && pixmap->pixmap)
       gc = _dw_set_colors(pixmap->pixmap);
@@ -8871,7 +8897,7 @@ void dw_draw_text(HWND handle, HPIXMAP pixmap, int x, int y, const char *text)
       return;
 
    DW_MUTEX_LOCK;
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
    {
       if((tmpname = (char *)gtk_object_get_data(GTK_OBJECT(handle), "_dw_fontname")))
          fontname = tmpname;
@@ -9359,7 +9385,7 @@ int API dw_pixmap_set_font(HPIXMAP pixmap, const char *fontname)
  *       pixmap: Handle to a pixmap returned by
  *               dw_pixmap_new..
  */
-void dw_pixmap_destroy(HPIXMAP pixmap)
+void API dw_pixmap_destroy(HPIXMAP pixmap)
 {
    int _dw_locked_by_me = FALSE;
 
@@ -9371,6 +9397,24 @@ void dw_pixmap_destroy(HPIXMAP pixmap)
       g_object_unref(pixmap->pixbuf);
    free(pixmap);
    DW_MUTEX_UNLOCK;
+}
+
+/*
+ * Returns the width of the pixmap, same as the DW_PIXMAP_WIDTH() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_width(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->width : 0;
+}
+
+/*
+ * Returns the height of the pixmap, same as the DW_PIXMAP_HEIGHT() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_height(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->height : 0;
 }
 
 #if GTK_CHECK_VERSION(2,10,0)
@@ -9385,7 +9429,7 @@ int _dw_cairo_pixmap_bitblt(HWND dest, HPIXMAP destp, int xdest, int ydest, int 
       return retval;
 
    DW_MUTEX_LOCK;
-   if(dest)
+   if(dest && _dw_render_safe_check(dest))
    {
       GdkWindow *window = gtk_widget_get_window(dest);
       /* Safety check for non-existant windows */
@@ -9502,7 +9546,7 @@ int API dw_pixmap_stretch_bitblt(HWND dest, HPIXMAP destp, int xdest, int ydest,
       return retval;
 
    DW_MUTEX_LOCK;
-   if(dest)
+   if(dest && _dw_render_safe_check(dest))
       gc = _dw_set_colors(dest->window);
    else if(src)
       gc = _dw_set_colors(src->window);
@@ -9511,7 +9555,7 @@ int API dw_pixmap_stretch_bitblt(HWND dest, HPIXMAP destp, int xdest, int ydest,
    else if(srcp)
       gc = gdk_gc_new(srcp->pixmap);
 
-   if ( gc )
+   if(gc)
    {
 #if GTK_MAJOR_VERSION > 1
       if(srcwidth != -1)
@@ -9549,25 +9593,25 @@ int API dw_pixmap_stretch_bitblt(HWND dest, HPIXMAP destp, int xdest, int ydest,
          /*
           * If we have a bitmap (mask) in the source pixmap, then set the clipping region
           */
-         if ( srcp && srcp->bitmap )
+         if(srcp && srcp->bitmap)
          {
-            gdk_gc_set_clip_mask( gc, srcp->bitmap );
-            gdk_gc_set_clip_origin( gc, xdest, ydest );
+            gdk_gc_set_clip_mask(gc, srcp->bitmap);
+            gdk_gc_set_clip_origin(gc, xdest, ydest);
          }
-         gdk_draw_pixmap( dest ? dest->window : destp->pixmap, gc, src ? src->window : srcp->pixmap, xsrc, ysrc, xdest, ydest, width, height );
+         gdk_draw_pixmap(dest ? dest->window : destp->pixmap, gc, src ? src->window : srcp->pixmap, xsrc, ysrc, xdest, ydest, width, height);
 
       }
 
       /*
        * Reset the clipping region
        */
-      if ( srcp && srcp->bitmap )
+      if(srcp && srcp->bitmap)
       {
-         gdk_gc_set_clip_mask( gc, NULL );
-         gdk_gc_set_clip_origin( gc, 0, 0 );
+         gdk_gc_set_clip_mask(gc, NULL);
+         gdk_gc_set_clip_origin(gc, 0, 0);
       }
 
-      gdk_gc_unref( gc );
+      gdk_gc_unref(gc);
       retval = DW_ERROR_NONE;
    }
    DW_MUTEX_UNLOCK;
@@ -13267,6 +13311,20 @@ static void _dw_html_populate_popup_cb(WebKitWebView *web_view, GtkMenu *menu, g
 #endif
 
 /*
+ * Install a javascript function with name that can call native code.
+ * Parameters:
+ *       handle: Handle to the HTML window.
+ *       name: Javascript function name.
+ * Notes: A DW_SIGNAL_HTML_MESSAGE event will be raised with scriptdata.
+ * Returns:
+ *       DW_ERROR_NONE (0) on success.
+ */
+int API dw_html_javascript_add(HWND handle, const char *name)
+{
+    return DW_ERROR_UNKNOWN;
+}
+
+/*
  * Create a new Entryfield window (widget) to be packed.
  * Parameters:
  *       text: The default text to be in the entryfield widget.
@@ -14094,6 +14152,8 @@ int API dw_feature_get(DWFEATURE feature)
         case DW_FEATURE_TREE:
         case DW_FEATURE_WINDOW_PLACEMENT:
             return DW_FEATURE_ENABLED;
+        case DW_FEATURE_RENDER_SAFE:
+            return _dw_render_safe_mode;
         default:
             return DW_FEATURE_UNSUPPORTED;
     }
@@ -14136,6 +14196,15 @@ int API dw_feature_set(DWFEATURE feature, int state)
         case DW_FEATURE_WINDOW_PLACEMENT:
             return DW_ERROR_GENERAL;
         /* These features are supported and configurable */
+        case DW_FEATURE_RENDER_SAFE:
+        {
+            if(state == DW_FEATURE_ENABLED || state == DW_FEATURE_DISABLED)
+            {
+                _dw_render_safe_mode = state;
+                return DW_ERROR_NONE;
+            }
+            return DW_ERROR_GENERAL;
+        }
         default:
             return DW_FEATURE_UNSUPPORTED;
     }

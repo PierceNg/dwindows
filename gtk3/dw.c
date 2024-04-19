@@ -3,7 +3,7 @@
  *          A GTK like cross-platform GUI
  *          GTK3 forwarder module for portabilty.
  *
- * (C) 2000-2022 Brian Smith <brian@dbsoft.org>
+ * (C) 2000-2023 Brian Smith <brian@dbsoft.org>
  * (C) 2003-2022 Mark Hessling <mark@rexx.org>
  * (C) 2002 Nickolay V. Shmyrev <shmyrev@yandex.ru>
  */
@@ -12,12 +12,10 @@
 #include <glib/gi18n.h>
 #include <string.h>
 #include <stdlib.h>
-#if !defined(GDK_WINDOWING_WIN32)
-# include <sys/utsname.h>
-# include <sys/socket.h>
-# include <sys/un.h>
-# include <sys/mman.h>
-#endif
+#include <sys/utsname.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/mman.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -173,6 +171,7 @@ static gint _dw_column_click_event(GtkWidget *widget, gpointer data);
 static void _dw_html_result_event(GObject *object, GAsyncResult *result, gpointer script_data);
 #ifdef USE_WEBKIT
 #ifdef USE_WEBKIT2
+static void _dw_html_message_event(WebKitUserContentManager *manager, WebKitJavascriptResult *result, gpointer *data);
 static void _dw_html_changed_event(WebKitWebView  *web_view, WebKitLoadEvent load_event, gpointer data);
 #else
 static void _dw_html_changed_event(WebKitWebView  *web_view, WebKitWebFrame *frame, gpointer user_data);
@@ -187,6 +186,26 @@ static char _dw_app_id[_DW_APP_ID_SIZE+1] = { 0 };
 #endif
 char *_DWDefaultFont = NULL;
 static char _dw_share_path[PATH_MAX+1] = { 0 };
+static int _dw_render_safe_mode = DW_FEATURE_UNSUPPORTED;
+
+/* Return TRUE if it is safe to draw on the window handle.
+ * Either we are in unsafe mode, or we are in an EXPOSE
+ * event for the requested render window handle.
+ */
+int _dw_render_safe_check(GtkWidget *handle)
+{
+    if(_dw_render_safe_mode == DW_FEATURE_DISABLED || 
+       (handle && g_object_get_data(G_OBJECT(handle), "_dw_expose")))
+           return TRUE;
+    return FALSE;
+}
+
+int _dw_is_render(GtkWidget *handle)
+{
+   if(GTK_IS_DRAWING_AREA(handle))
+       return TRUE;
+   return FALSE;
+}
 
 typedef struct
 {
@@ -205,10 +224,8 @@ typedef struct
 
 } DWSignalHandler;
 
-#define SIGNALMAX 20
-
-/* A list of signal forwarders, to account for paramater differences. */
-static DWSignalList DWSignalTranslate[SIGNALMAX] = {
+/* A list of signal forwarders, to account for parameter differences. */
+static DWSignalList DWSignalTranslate[] = {
    { _dw_configure_event,         DW_SIGNAL_CONFIGURE },
    { _dw_key_press_event,         DW_SIGNAL_KEY_PRESS },
    { _dw_button_press_event,      DW_SIGNAL_BUTTON_PRESS },
@@ -232,7 +249,11 @@ static DWSignalList DWSignalTranslate[SIGNALMAX] = {
 #else
    { _dw_generic_event,           DW_SIGNAL_HTML_CHANGED },
 #endif
-   { _dw_html_result_event,       DW_SIGNAL_HTML_RESULT }
+   { _dw_html_result_event,       DW_SIGNAL_HTML_RESULT },
+#ifdef USE_WEBKIT2
+   { _dw_html_message_event,      DW_SIGNAL_HTML_MESSAGE },
+#endif
+   { NULL,                        "" }
 };
 
 /* Alignment flags */
@@ -1127,16 +1148,18 @@ static void _dw_msleep(long period)
 }
 
 /* Finds the translation function for a given signal name */
-static void *_dw_findsigfunc(const char *signame)
+static DWSignalList _dw_findsignal(const char *signame)
 {
-   int z;
+   int z=0;
+   static DWSignalList empty = {0};
 
-   for(z=0;z<SIGNALMAX;z++)
+   while(DWSignalTranslate[z].func)
    {
       if(strcasecmp(signame, DWSignalTranslate[z].name) == 0)
-         return DWSignalTranslate[z].func;
+         return DWSignalTranslate[z];
+      z++;
    }
-   return NULL;
+   return empty;
 }
 
 static DWSignalHandler _dw_get_signal_handler(gpointer data)
@@ -1223,7 +1246,9 @@ static void _dw_html_result_event(GObject *object, GAsyncResult *result, gpointe
 {
 #if USE_WEBKIT2
     pthread_t saved_thread = _dw_thread;
+#if !WEBKIT_CHECK_VERSION(2, 40, 0)
     WebKitJavascriptResult *js_result;
+#endif
 #if WEBKIT_CHECK_VERSION(2, 22, 0)
     JSCValue *value;
 #else
@@ -1250,17 +1275,23 @@ static void _dw_html_result_event(GObject *object, GAsyncResult *result, gpointe
         }
     }
 
+#if WEBKIT_CHECK_VERSION(2, 40, 0)
+    if(!(value = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(object), result, &error)))
+#else
     if(!(js_result = webkit_web_view_run_javascript_finish(WEBKIT_WEB_VIEW(object), result, &error)))
+#endif
     {
         if(htmlresultfunc)
            htmlresultfunc((HWND)object, DW_ERROR_UNKNOWN, error->message, script_data, user_data);
-        g_error_free (error);
+        g_error_free(error);
         _dw_thread = saved_thread;
         return;
     }
 
 #if WEBKIT_CHECK_VERSION(2, 22, 0)
+#if !WEBKIT_CHECK_VERSION(2, 40, 0)
     value = webkit_javascript_result_get_js_value(js_result);
+#endif
     if(jsc_value_is_string(value))
     {
         gchar *str_value = jsc_value_to_string(value);
@@ -1294,10 +1325,82 @@ static void _dw_html_result_event(GObject *object, GAsyncResult *result, gpointe
     }
     else if(htmlresultfunc)
         htmlresultfunc((HWND)object, DW_ERROR_UNKNOWN, NULL, script_data, user_data);
+#if !WEBKIT_CHECK_VERSION(2, 40, 0)
     webkit_javascript_result_unref (js_result);
+#endif
    _dw_thread = saved_thread;
 #endif
 }
+
+#ifdef USE_WEBKIT2
+static void _dw_html_message_event(WebKitUserContentManager *manager, WebKitJavascriptResult *js_result, gpointer *data)
+{
+    pthread_t saved_thread = _dw_thread;
+    HWND window = (HWND)data[0];
+    int (*htmlmessagefunc)(HWND, char *, char *, void *) = NULL;
+    void *user_data = NULL;
+    gchar *name = (gchar *)data[1];
+    gint handlerdata;
+#if WEBKIT_CHECK_VERSION(2, 22, 0)
+    JSCValue *value;
+#else
+    JSValueRef value;
+    JSGlobalContextRef context;
+#endif
+
+    _dw_thread = (pthread_t)-1;
+    if(window && (handlerdata = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(window), "_dw_html_message_id"))))
+    {
+        void *params[3] = { GINT_TO_POINTER(handlerdata-1), 0, window };
+        DWSignalHandler work = _dw_get_signal_handler(params);
+
+        if(work.window)
+        {
+            htmlmessagefunc = work.func;
+            user_data = work.data;
+        }
+    }
+
+#if WEBKIT_CHECK_VERSION(2, 22, 0)
+    value = webkit_javascript_result_get_js_value(js_result);
+    if(jsc_value_is_string(value))
+    {
+        gchar *str_value = jsc_value_to_string(value);
+        JSCException *exception = jsc_context_get_exception(jsc_value_get_context(value));
+#else
+    context = webkit_javascript_result_get_global_context(js_result);
+    value = webkit_javascript_result_get_value(js_result);
+    if(JSValueIsString(context, value))
+    {
+        JSStringRef js_str_value;
+        gchar *str_value;
+        gsize str_length;
+        void *exception = NULL;
+
+        js_str_value = JSValueToStringCopy(context, value, NULL);
+        str_length = JSStringGetMaximumUTF8CStringSize(js_str_value);
+        str_value = (gchar *)g_malloc (str_length);
+        JSStringGetUTF8CString(js_str_value, str_value, str_length);
+        JSStringRelease(js_str_value);
+#endif
+
+        if(htmlmessagefunc && !exception)
+            htmlmessagefunc(window, name, str_value, user_data);
+
+        g_free(str_value);
+
+        if(!exception)
+        {
+            _dw_thread = saved_thread;
+            return;
+        }
+    }
+
+    if(htmlmessagefunc)
+        htmlmessagefunc(window, name, NULL, user_data);
+   _dw_thread = saved_thread;
+}
+#endif
 
 #ifdef USE_WEBKIT
 #ifdef USE_WEBKIT2
@@ -1520,6 +1623,7 @@ static gint _dw_expose_event(GtkWidget *widget, cairo_t *cr, gpointer data)
    {
       DWExpose exp;
       int (*exposefunc)(HWND, DWExpose *, void *) = work.func;
+      gpointer oldrender = NULL;
 
       /* Remove the currently drawn widget from the dirty list */
       _dw_dirty_list = g_list_remove(_dw_dirty_list, widget);
@@ -1528,7 +1632,14 @@ static gint _dw_expose_event(GtkWidget *widget, cairo_t *cr, gpointer data)
       exp.width = gtk_widget_get_allocated_width(widget);
       exp.height = gtk_widget_get_allocated_height(widget);
       g_object_set_data(G_OBJECT(work.window), "_dw_cr", (gpointer)cr);
+      if(_dw_render_safe_mode == DW_FEATURE_ENABLED && _dw_is_render(work.window))
+      {
+      	oldrender = g_object_get_data(G_OBJECT(work.window), "_dw_expose");
+      	g_object_set_data(G_OBJECT(work.window), "_dw_expose", (gpointer)1);
+      }
       retval = exposefunc(work.window, &exp, work.data);
+      if(_dw_render_safe_mode == DW_FEATURE_ENABLED)
+      	g_object_set_data(G_OBJECT(work.window), "_dw_expose", oldrender);
       g_object_set_data(G_OBJECT(work.window), "_dw_cr", NULL);
    }
    return retval;
@@ -2158,7 +2269,19 @@ int dw_init(int newthread, int argc, char *argv[])
       g_application_activate(_DWApp);
    }
 #endif
-   return TRUE;
+   if(_dw_render_safe_mode == DW_FEATURE_UNSUPPORTED)
+   {
+#ifdef GDK_WINDOWING_X11
+   	GdkDisplay *display = gdk_display_get_default();
+   
+	   /* If we are in X11 mode safe mode should be disabled by default */
+	   if(display && GDK_IS_X11_DISPLAY(display))
+	   	_dw_render_safe_mode = DW_FEATURE_DISABLED;
+	   else
+#endif
+			_dw_render_safe_mode = DW_FEATURE_ENABLED;
+	}
+	return DW_ERROR_NONE;
 }
 
 /*
@@ -7398,7 +7521,7 @@ void dw_draw_point(HWND handle, HPIXMAP pixmap, int x, int y)
 #endif
 
    DW_MUTEX_LOCK;
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
    {
       GdkDisplay *display = gdk_display_get_default();
 
@@ -7474,7 +7597,7 @@ void dw_draw_line(HWND handle, HPIXMAP pixmap, int x1, int y1, int x2, int y2)
 #endif
 
    DW_MUTEX_LOCK;
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
    {
       GdkDisplay *display = gdk_display_get_default();
       
@@ -7552,7 +7675,7 @@ void dw_draw_polygon(HWND handle, HPIXMAP pixmap, int flags, int npoints, int *x
 #endif
 
    DW_MUTEX_LOCK;
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
    {
       GdkDisplay *display = gdk_display_get_default();
       
@@ -7638,7 +7761,7 @@ void dw_draw_rect(HWND handle, HPIXMAP pixmap, int flags, int x, int y, int widt
 #endif
 
    DW_MUTEX_LOCK;
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
    {
       GdkDisplay *display = gdk_display_get_default();
       
@@ -7726,7 +7849,7 @@ void API dw_draw_arc(HWND handle, HPIXMAP pixmap, int flags, int xorigin, int yo
 #endif
 
    DW_MUTEX_LOCK;
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
    {
       GdkDisplay *display = gdk_display_get_default();
       
@@ -7826,7 +7949,7 @@ void dw_draw_text(HWND handle, HPIXMAP pixmap, int x, int y, const char *text)
       return;
 
    DW_MUTEX_LOCK;
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
    {
       GdkDisplay *display = gdk_display_get_default();
       
@@ -8220,7 +8343,7 @@ int API dw_pixmap_set_font(HPIXMAP pixmap, const char *fontname)
  *       pixmap: Handle to a pixmap returned by
  *               dw_pixmap_new..
  */
-void dw_pixmap_destroy(HPIXMAP pixmap)
+void API dw_pixmap_destroy(HPIXMAP pixmap)
 {
    int _dw_locked_by_me = FALSE;
 
@@ -8231,6 +8354,24 @@ void dw_pixmap_destroy(HPIXMAP pixmap)
       free(pixmap->font);
    free(pixmap);
    DW_MUTEX_UNLOCK;
+}
+
+/*
+ * Returns the width of the pixmap, same as the DW_PIXMAP_WIDTH() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_width(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->width : 0;
+}
+
+/*
+ * Returns the height of the pixmap, same as the DW_PIXMAP_HEIGHT() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_height(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->height : 0;
 }
 
 /*
@@ -8285,7 +8426,7 @@ int API dw_pixmap_stretch_bitblt(HWND dest, HPIXMAP destp, int xdest, int ydest,
       return retval;
 
    DW_MUTEX_LOCK;
-   if(dest)
+   if(dest && _dw_render_safe_check(dest))
    {
       GdkDisplay *display = gdk_display_get_default();
       
@@ -11867,9 +12008,13 @@ int dw_html_javascript_run(HWND handle, const char *script, void *scriptdata)
    WebKitWebView *web_view;
 
    DW_MUTEX_LOCK;
-   if((web_view = _dw_html_web_view(handle)))
+   if(script && (web_view = _dw_html_web_view(handle)))
 #ifdef USE_WEBKIT2
+#if WEBKIT_CHECK_VERSION(2, 40, 0)
+      webkit_web_view_evaluate_javascript(web_view, script, strlen(script), NULL, NULL, NULL, _dw_html_result_event, scriptdata);
+#else
       webkit_web_view_run_javascript(web_view, script, NULL, _dw_html_result_event, scriptdata);
+#endif
 #else
       webkit_web_view_execute_script(web_view, script);
 #endif
@@ -11878,6 +12023,60 @@ int dw_html_javascript_run(HWND handle, const char *script, void *scriptdata)
 #else
    return DW_ERROR_UNKNOWN;
 #endif
+}
+
+/* Free the name when the signal disconnects */
+void _dw_html_message_disconnect(gpointer gdata, GClosure *closure)
+{
+    gpointer *data = (gpointer *)gdata;
+
+    if(data)
+    {
+        gchar *name = (gchar *)data[1];
+
+        if(name)
+            g_free(name);
+        free(data);
+    }
+}
+
+/*
+ * Install a javascript function with name that can call native code.
+ * Parameters:
+ *       handle: Handle to the HTML window.
+ *       name: Javascript function name.
+ * Notes: A DW_SIGNAL_HTML_MESSAGE event will be raised with scriptdata.
+ * Returns:
+ *       DW_ERROR_NONE (0) on success.
+ */
+int API dw_html_javascript_add(HWND handle, const char *name)
+{
+#ifdef USE_WEBKIT2
+   WebKitWebView *web_view= _dw_html_web_view(handle);
+   WebKitUserContentManager *manager;
+
+    if(web_view && (manager = webkit_web_view_get_user_content_manager(web_view)) && name) 
+    {
+        /* Script to inject that will call the handler we are adding */
+        gchar *script = g_strdup_printf("function %s(body) {window.webkit.messageHandlers.%s.postMessage(body);}", 
+                            name, name);
+        gchar *signal = g_strdup_printf("script-message-received::%s", name);
+        WebKitUserScript *userscript = webkit_user_script_new(script, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
+                                                              WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+        gpointer *data = calloc(sizeof(gpointer), 2);
+
+        data[0] = handle;
+        data[1] = g_strdup(name);
+        g_signal_connect_data(manager, signal, G_CALLBACK(_dw_html_message_event), data, _dw_html_message_disconnect, 0);
+        webkit_user_content_manager_register_script_message_handler(manager, name);
+        webkit_user_content_manager_add_script(manager, userscript);
+
+        g_free(script);
+        g_free(signal);
+        return DW_ERROR_NONE;
+    }
+#endif
+    return DW_ERROR_UNKNOWN;
 }
 
 #if defined(USE_WEBKIT) && !defined(USE_WEBKIT2)
@@ -11918,12 +12117,18 @@ HWND dw_html_new(unsigned long id)
    WebKitWebView *web_view;
 #ifdef USE_WEBKIT2
    WebKitSettings *settings;
+   WebKitUserContentManager *manager;
 #else
    WebKitWebSettings *settings;
 #endif
 
    DW_MUTEX_LOCK;
+#ifdef USE_WEBKIT2
+   manager = webkit_user_content_manager_new();
+   web_view = (WebKitWebView *)webkit_web_view_new_with_user_content_manager(manager);
+#else
    web_view = (WebKitWebView *)webkit_web_view_new();
+#endif
    /* WebKit2 no longer requires a scrolled window...
     * So only create a scrolled window and pack it in older versions.
     */
@@ -12372,7 +12577,8 @@ static void _dw_signal_disconnect(gpointer data, GClosure *closure)
  */
 void dw_signal_connect_data(HWND window, const char *signame, void *sigfunc, void *discfunc, void *data)
 {
-   void *thisfunc  = _dw_findsigfunc(signame);
+   DWSignalList signal = _dw_findsignal(signame);
+   void *thisfunc  = signal.func;
    char *thisname = (char *)signame;
    HWND thiswindow = window;
    int sigid, _dw_locked_by_me = FALSE;
@@ -12415,8 +12621,9 @@ void dw_signal_connect_data(HWND window, const char *signame, void *sigfunc, voi
    }
    else if (GTK_IS_MENU_ITEM(thiswindow) && strcmp(signame, DW_SIGNAL_CLICKED) == 0)
    {
+      DWSignalList signal = _dw_findsignal(signame);
       thisname = "activate";
-      thisfunc = _dw_findsigfunc(thisname);
+      thisfunc = signal.func;
    }
    else if (GTK_IS_TREE_VIEW(thiswindow)  && strcmp(signame, DW_SIGNAL_ITEM_CONTEXT) == 0)
    {
@@ -12459,6 +12666,7 @@ void dw_signal_connect_data(HWND window, const char *signame, void *sigfunc, voi
    }
    else if (GTK_IS_TREE_VIEW(thiswindow) && strcmp(signame, DW_SIGNAL_ITEM_ENTER) == 0)
    {
+      DWSignalList signal = _dw_findsignal(DW_SIGNAL_ITEM_ENTER);
       sigid = _dw_set_signal_handler(thiswindow, window, sigfunc, data, _dw_container_enter_event, discfunc);
       params[0] = GINT_TO_POINTER(sigid);
       params[2] = (void *)thiswindow;
@@ -12468,7 +12676,7 @@ void dw_signal_connect_data(HWND window, const char *signame, void *sigfunc, voi
       params = calloc(sizeof(void *), _DW_INTERNAL_CALLBACK_PARAMS);
 
       thisname = "button_press_event";
-      thisfunc = _dw_findsigfunc(DW_SIGNAL_ITEM_ENTER);
+      thisfunc = signal.func;
    }
    else if (GTK_IS_TREE_VIEW(thiswindow) && strcmp(signame, DW_SIGNAL_COLUMN_CLICK) == 0)
    {
@@ -12527,6 +12735,18 @@ void dw_signal_connect_data(HWND window, const char *signame, void *sigfunc, voi
       DW_MUTEX_UNLOCK;
       return;
    }
+#ifdef USE_WEBKIT2
+   else if (WEBKIT_IS_WEB_VIEW(thiswindow) && strcmp(signame, DW_SIGNAL_HTML_MESSAGE) == 0)
+   {
+      /* We don't actually need a signal handler here... just need to assign the handler ID
+       * Since the handler is created in dw_html_javasript_add()
+       */
+      sigid = _dw_set_signal_handler(thiswindow, window, sigfunc, data, _dw_html_message_event, discfunc);
+      g_object_set_data(G_OBJECT(thiswindow), "_dw_html_message_id", GINT_TO_POINTER(sigid+1));
+      DW_MUTEX_UNLOCK;
+      return;
+   }
+#endif
 #endif
 #if 0
    else if (strcmp(signame, DW_SIGNAL_LOSE_FOCUS) == 0)
@@ -12567,15 +12787,15 @@ void dw_signal_connect_data(HWND window, const char *signame, void *sigfunc, voi
  */
 void dw_signal_disconnect_by_name(HWND window, const char *signame)
 {
+   DWSignalList signal = _dw_findsignal(signame);
+   void *thisfunc = signal.func;
    int z, count;
-   void *thisfunc;
    int _dw_locked_by_me = FALSE;
    void **params = alloca(sizeof(void *) * 3);
 
    DW_MUTEX_LOCK;
    params[2] = _dw_find_signal_window(window, signame);
    count = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(params[2]), "_dw_sigcounter"));
-   thisfunc = _dw_findsigfunc(signame);
 
    for(z=0;z<count;z++)
    {
@@ -12707,6 +12927,7 @@ int API dw_feature_get(DWFEATURE feature)
 #endif
 #ifdef USE_WEBKIT2
         case DW_FEATURE_HTML_RESULT:
+        case DW_FEATURE_HTML_MESSAGE:
 #endif
 #if GLIB_CHECK_VERSION(2,40,0)
         case DW_FEATURE_NOTIFICATION:
@@ -12722,6 +12943,8 @@ int API dw_feature_get(DWFEATURE feature)
         case DW_FEATURE_MLE_WORD_WRAP:
         case DW_FEATURE_TREE:
             return DW_FEATURE_ENABLED;
+        case DW_FEATURE_RENDER_SAFE:
+            return _dw_render_safe_mode;
 #ifdef GDK_WINDOWING_X11
         case DW_FEATURE_WINDOW_PLACEMENT:
         {
@@ -12765,6 +12988,7 @@ int API dw_feature_set(DWFEATURE feature, int state)
 #endif
 #ifdef USE_WEBKIT2
         case DW_FEATURE_HTML_RESULT:
+        case DW_FEATURE_HTML_MESSAGE:
 #endif
 #if GLIB_CHECK_VERSION(2,40,0)
         case DW_FEATURE_NOTIFICATION:
@@ -12796,6 +13020,15 @@ int API dw_feature_set(DWFEATURE feature, int state)
         }
 #endif
         /* These features are supported and configurable */
+        case DW_FEATURE_RENDER_SAFE:
+        {
+            if(state == DW_FEATURE_ENABLED || state == DW_FEATURE_DISABLED)
+            {
+                _dw_render_safe_mode = state;
+                return DW_ERROR_NONE;
+            }
+            return DW_ERROR_GENERAL;
+        }
         default:
             return DW_FEATURE_UNSUPPORTED;
     }

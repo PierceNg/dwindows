@@ -240,6 +240,8 @@ EXPORTS
   dw_pixmap_set_transparent_color        @346
   dw_pixmap_set_font                     @347
   dw_pixmap_stretch_bitblt               @348
+  dw_pixmap_get_width                    @355
+  dw_pixmap_get_height                   @356
 
   dw_dialog_new                          @350
   dw_dialog_dismiss                      @351
@@ -311,6 +313,7 @@ EXPORTS
   dw_html_raw                            @472
   dw_html_url                            @473
   dw_html_javascript_run                 @474
+  dw_html_javascript_add                 @475
 
   dw_calendar_new                        @480
   dw_calendar_set_date                   @481

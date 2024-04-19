@@ -1,4 +1,4 @@
-// (C) 2021-2022 Brian Smith <brian@dbsoft.org>
+// (C) 2021-2023 Brian Smith <brian@dbsoft.org>
 // (C) 2019 Anton Popov (Color Picker)
 // (C) 2022 Amr Hesham (Tree View)
 package org.dbsoft.dwindows
@@ -12,6 +12,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.*
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.content.res.Resources
 import android.database.Cursor
@@ -39,11 +40,13 @@ import android.util.Base64
 import android.view.*
 import android.view.View.OnTouchListener
 import android.view.inputmethod.EditorInfo
+import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.*
 import android.widget.AdapterView.OnItemClickListener
 import android.widget.SeekBar.OnSeekBarChangeListener
+import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.AppCompatEditText
@@ -51,6 +54,7 @@ import androidx.collection.SimpleArrayMap
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.constraintlayout.widget.ConstraintSet
 import androidx.constraintlayout.widget.Placeholder
+import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -1493,6 +1497,7 @@ object DWEvent {
     const val COLUMN_CLICK = 17
     const val HTML_RESULT = 18
     const val HTML_CHANGED = 19
+    const val HTML_MESSAGE = 20
 }
 
 val DWImageExts = arrayOf("", ".png", ".webp", ".jpg", ".jpeg", ".gif")
@@ -1522,6 +1527,8 @@ class DWTabViewPagerAdapter : RecyclerView.Adapter<DWTabViewPagerAdapter.DWEvent
 }
 
 private class DWWebViewClient : WebViewClient() {
+    val HTMLAdds = mutableListOf<String>()
+
     //Implement shouldOverrideUrlLoading//
     @Deprecated("Deprecated in Java")
     override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
@@ -1535,11 +1542,25 @@ private class DWWebViewClient : WebViewClient() {
     }
 
     override fun onPageFinished(view: WebView, url: String) {
+        // Inject the functions on the page on complete
+        HTMLAdds.forEach { e -> view.loadUrl("javascript:function $e(body) { DWindows.postMessage('$e', body) }") }
+
         // Handle the DW_HTML_CHANGE_COMPLETE event
         eventHandlerHTMLChanged(view, DWEvent.HTML_CHANGED, url, 4)
     }
 
     external fun eventHandlerHTMLChanged(obj1: View, message: Int, URI: String, status: Int)
+}
+
+class DWWebViewInterface internal constructor(var view: View) {
+    /* Show a toast from the web page  */
+    @JavascriptInterface
+    fun postMessage(name: String?, body: String?) {
+        // Handle the DW_HTML_MESSAGE event
+        eventHandlerHTMLMessage(view, DWEvent.HTML_MESSAGE, name, body)
+    }
+
+    external fun eventHandlerHTMLMessage(obj1: View, message: Int, hmltName: String?, htmlBody: String?)
 }
 
 class DWPrintDocumentAdapter : PrintDocumentAdapter()
@@ -1838,24 +1859,53 @@ class DWListBox(context: Context) : ListView(context), OnItemClickListener {
 
 class DWRender(context: Context) : View(context) {
     var cachedCanvas: Canvas? = null
+    var backingBitmap: Bitmap? = null
     var typeface: Typeface? = null
     var fontsize: Float? = null
     var evx: Float = 0f
     var evy: Float = 0f
     var button: Int = 1
 
+    fun createBitmap() {
+        // If we don't have a backing bitmap, or its size in invalid
+        if(backingBitmap == null ||
+            backingBitmap!!.width != this.width || backingBitmap!!.height != this.height) {
+            // Create the backing bitmap
+            backingBitmap = Bitmap.createBitmap(this.width, this.height, Bitmap.Config.ARGB_8888)
+        }
+        cachedCanvas = Canvas(backingBitmap!!)
+    }
+
+    fun finishDraw() {
+        cachedCanvas = null
+        this.invalidate()
+    }
+
     override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
         super.onSizeChanged(width, height, oldWidth, oldHeight)
+        if(backingBitmap != null &&
+            (backingBitmap!!.width != width || backingBitmap!!.height != height)) {
+            backingBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        }
         // Send DW_SIGNAL_CONFIGURE
         eventHandlerInt(DWEvent.CONFIGURE, width, height, 0, 0)
+        if(backingBitmap != null) {
+            // Send DW_SIGNAL_EXPOSE
+            eventHandlerInt(DWEvent.EXPOSE, 0, 0, width, height)
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        cachedCanvas = canvas
-        // Send DW_SIGNAL_EXPOSE
-        eventHandlerInt(DWEvent.EXPOSE, 0, 0, this.width, this.height)
-        cachedCanvas = null
+        if(backingBitmap != null && cachedCanvas == null) {
+            canvas.drawBitmap(backingBitmap!!, 0f, 0f, null)
+        } else {
+            val savedCanvas = cachedCanvas
+            cachedCanvas = canvas
+            // Send DW_SIGNAL_EXPOSE
+            eventHandlerInt(DWEvent.EXPOSE, 0, 0, this.width, this.height)
+            cachedCanvas = savedCanvas
+        }
     }
 
     external fun eventHandlerInt(
@@ -4738,6 +4788,7 @@ class DWindows : AppCompatActivity() {
             // Configure a few settings to make it behave as we expect
             html!!.webViewClient = DWWebViewClient()
             html!!.settings.javaScriptEnabled = true
+            html!!.addJavascriptInterface(DWWebViewInterface(html!!), "DWindows");
         }
         return html
     }
@@ -4764,6 +4815,14 @@ class DWindows : AppCompatActivity() {
                 // Execute onReceiveValue's code
                 eventHandlerHTMLResult(html, DWEvent.HTML_RESULT, value, data)
             }
+        }
+    }
+
+    fun htmlJavascriptAdd(html: WebView, name: String)
+    {
+        waitOnUiThread {
+            val client = html.webViewClient as DWWebViewClient
+            client.HTMLAdds += name
         }
     }
 
@@ -6056,10 +6115,28 @@ class DWindows : AppCompatActivity() {
         return render
     }
 
-    fun renderRedraw(render: DWRender)
+    fun renderRedraw(render: DWRender, safe: Int)
     {
         runOnUiThread {
-            render.invalidate()
+            if(safe != 0) {
+                render.eventHandlerInt(DWEvent.EXPOSE, 0, 0, render.width, render.height)
+            } else {
+                render.invalidate()
+            }
+        }
+    }
+
+    fun renderCreateBitmap(render: DWRender)
+    {
+        runOnUiThread {
+            render.createBitmap()
+        }
+    }
+
+    fun renderFinishDraw(render: DWRender)
+    {
+        runOnUiThread {
+            render.finishDraw()
         }
     }
 
@@ -6878,7 +6955,13 @@ class DWindows : AppCompatActivity() {
             notificationID += 1
             with(NotificationManagerCompat.from(this)) {
                 // notificationId is a unique int for each notification that you must define
-                notify(notificationID, builder.build())
+                if (ActivityCompat.checkSelfPermission(
+                        this@DWindows,
+                        Manifest.permission.POST_NOTIFICATIONS
+                    ) == PackageManager.PERMISSION_GRANTED
+                ) {
+                    notify(notificationID, builder.build())
+                }
             }
         }
     }

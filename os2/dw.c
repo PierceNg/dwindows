@@ -2,7 +2,7 @@
  * Dynamic Windows:
  *          A GTK like implementation of the PM GUI
  *
- * (C) 2000-2022 Brian Smith <brian@dbsoft.org>
+ * (C) 2000-2023 Brian Smith <brian@dbsoft.org>
  * (C) 2003-2021 Mark Hessling <mark@rexx.org>
  * (C) 2000 Achim Hasenmueller <achimha@innotek.de>
  * (C) 2000 Peter Nielsen <peter@pmview.com>
@@ -124,6 +124,27 @@ ULONG _dw_ver_buf[4];
 HWND _dw_lasthcnr = 0, _dw_lastitem = 0, _dw_popup = 0, _dw_desktop;
 HMOD _dw_wpconfig = 0, _dw_pmprintf = 0, _dw_pmmerge = 0, _dw_gbm = 0;
 static char _dw_exec_dir[MAX_PATH+1] = {0};
+static int _dw_render_safe_mode = DW_FEATURE_DISABLED;
+static HWND _dw_render_expose = DW_NOHWND;
+
+/* Return TRUE if it is safe to draw on the window handle.
+ * Either we are in unsafe mode, or we are in an EXPOSE
+ * event for the requested render window handle.
+ */
+int _dw_render_safe_check(HWND handle)
+{
+    if(_dw_render_safe_mode == DW_FEATURE_DISABLED || 
+       (handle && _dw_render_expose == handle))
+           return TRUE;
+    return FALSE;
+}
+
+int _dw_is_render(HWND handle)
+{
+   if(dw_window_get_data(handle, "_dw_render"))
+       return TRUE;
+   return FALSE;
+}
 
 #ifdef UNICODE
 /* Atom for "text/unicode" clipboard format */
@@ -3122,13 +3143,17 @@ MRESULT EXPENTRY _dw_run_event(HWND hWnd, ULONG msg, MPARAM mp1, MPARAM mp2)
                if(hWnd == tmp->window)
                {
                   int height = _dw_get_height(hWnd);
+                  HWND oldrender = _dw_render_expose;
 
                   hps = WinBeginPaint(hWnd, 0L, &rc);
                   exp.x = rc.xLeft;
                   exp.y = height - rc.yTop;
                   exp.width = rc.xRight - rc. xLeft;
                   exp.height = rc.yTop - rc.yBottom;
+                  if(_dw_render_safe_mode == DW_FEATURE_ENABLED && _dw_is_render(hWnd))
+                     _dw_render_expose = hWnd;
                   result = exposefunc(hWnd, &exp, tmp->data);
+                  _dw_render_expose = oldrender;
                   WinEndPaint(hps);
                }
             }
@@ -10833,7 +10858,7 @@ void API dw_draw_point(HWND handle, HPIXMAP pixmap, int x, int y)
    int height;
    POINTL ptl;
 
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
    {
       hps = _dw_set_colors(handle);
       height = _dw_get_height(handle);
@@ -10869,7 +10894,7 @@ void API dw_draw_line(HWND handle, HPIXMAP pixmap, int x1, int y1, int x2, int y
    int height;
    POINTL ptl[2];
 
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
    {
       hps = _dw_set_colors(handle);
       height = _dw_get_height(handle);
@@ -10936,7 +10961,7 @@ void API dw_draw_text(HWND handle, HPIXMAP pixmap, int x, int y, const char *tex
     char fontname[128];
     POINTL aptl[TXTBOX_COUNT];
 
-    if(handle)
+    if(handle && _dw_render_safe_check(handle))
     {
         hps = _dw_set_colors(handle);
         height = _dw_get_height(handle);
@@ -11027,7 +11052,7 @@ void API dw_font_text_extents_get(HWND handle, HPIXMAP pixmap, const char *text,
  *       width: Width of rectangle.
  *       height: Height of rectangle.
  */
-void API dw_draw_polygon( HWND handle, HPIXMAP pixmap, int flags, int npoints, int *x, int *y )
+void API dw_draw_polygon(HWND handle, HPIXMAP pixmap, int flags, int npoints, int *x, int *y)
 {
    HPS hps;
    int thisheight;
@@ -11035,7 +11060,7 @@ void API dw_draw_polygon( HWND handle, HPIXMAP pixmap, int flags, int npoints, i
    POINTL start;
    int i;
 
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
    {
       hps = _dw_set_colors(handle);
       thisheight = _dw_get_height(handle);
@@ -11099,7 +11124,7 @@ void API dw_draw_rect(HWND handle, HPIXMAP pixmap, int flags, int x, int y, int 
    int thisheight;
    POINTL ptl[2];
 
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
    {
       hps = _dw_set_colors(handle);
       thisheight = _dw_get_height(handle);
@@ -11150,7 +11175,7 @@ void API dw_draw_arc(HWND handle, HPIXMAP pixmap, int flags, int xorigin, int yo
    POINTL pts[2];
    double r, a1, a2, a;
 
-   if(handle)
+   if(handle && _dw_render_safe_check(handle))
    {
       hps = _dw_set_colors(handle);
       thisheight = _dw_get_height(handle);
@@ -11473,6 +11498,24 @@ void API dw_pixmap_destroy(HPIXMAP pixmap)
 }
 
 /*
+ * Returns the width of the pixmap, same as the DW_PIXMAP_WIDTH() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_width(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->width : 0;
+}
+
+/*
+ * Returns the height of the pixmap, same as the DW_PIXMAP_HEIGHT() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_height(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->height : 0;
+}
+
+/*
  * Copies from one item to another.
  * Parameters:
  *       dest: Destination window handle.
@@ -11521,7 +11564,7 @@ int API dw_pixmap_stretch_bitblt(HWND dest, HPIXMAP destp, int xdest, int ydest,
    if((srcheight == -1 || srcwidth == -1) && srcheight != srcwidth)
       return DW_ERROR_GENERAL;
 
-   if(dest)
+   if(dest && _dw_render_safe_check(dest))
    {
       hpsdest = WinGetPS(dest);
       dheight = _dw_get_height(dest);
@@ -12958,6 +13001,20 @@ int dw_html_javascript_run(HWND DW_UNUSED(handle), const char * DW_UNUSED(script
 }
 
 /*
+ * Install a javascript function with name that can call native code.
+ * Parameters:
+ *       handle: Handle to the HTML window.
+ *       name: Javascript function name.
+ * Notes: A DW_SIGNAL_HTML_MESSAGE event will be raised with scriptdata.
+ * Returns:
+ *       DW_ERROR_NONE (0) on success.
+ */
+int API dw_html_javascript_add(HWND handle, const char *name)
+{
+    return DW_ERROR_UNKNOWN;
+}
+
+/*
  * Create a new HTML window (widget) to be packed.
  * Not available under OS/2, eCS
  * Parameters:
@@ -13923,6 +13980,8 @@ int API dw_feature_get(DWFEATURE feature)
                 return DW_FEATURE_ENABLED;
             return DW_FEATURE_UNSUPPORTED;
         }
+        case DW_FEATURE_RENDER_SAFE:
+            return _dw_render_safe_mode;
         default:
             return DW_FEATURE_UNSUPPORTED;
     }
@@ -13963,6 +14022,15 @@ int API dw_feature_set(DWFEATURE feature, int state)
             return DW_FEATURE_UNSUPPORTED;
         }
         /* These features are supported and configurable */
+        case DW_FEATURE_RENDER_SAFE:
+        {
+            if(state == DW_FEATURE_ENABLED || state == DW_FEATURE_DISABLED)
+            {
+                _dw_render_safe_mode = state;
+                return DW_ERROR_NONE;
+            }
+            return DW_ERROR_GENERAL;
+        }
         default:
             return DW_FEATURE_UNSUPPORTED;
     }

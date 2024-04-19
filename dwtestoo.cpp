@@ -1,9 +1,11 @@
-/*
- * Simple C++ Dynamic Windows Example
- */
+// An example Dynamic Windows application and testing
+// ground for Dynamic Windows features in C++.
+// By: Brian Smith and Mark Hessling
 #include "dw.hpp"
+#include <cstdio>
+#include <errno.h>
 
-/* Select a fixed width font for our platform */
+// Select a fixed width font for our platform 
 #ifdef __OS2__
 #define FIXEDFONT "5.System VIO"
 #define PLATFORMFOLDER "os2\\"
@@ -31,11 +33,88 @@
 #define APP_TITLE "Dynamic Windows C++"
 #define APP_EXIT "Are you sure you want to exit?"
 
+#define MAX_WIDGETS 20
+#define BUF_SIZE 1024
+
+// Handle the case of very old compilers by using
+// A simple non-lambda example instead.
+#ifndef DW_LAMBDA
+
+// Simple C++ Dynamic Windows Example
+
+class DWTest : public DW::Window
+{
+public:
+    DW::App *app;
+
+    DWTest() {
+        app = DW::App::Init();
+
+        SetText(APP_TITLE);
+        SetSize(200, 200);
+     }
+     int OnDelete() override { 
+         if(app->MessageBox(APP_TITLE, DW_MB_YESNO | DW_MB_QUESTION, APP_EXIT) != 0) {
+             app->MainQuit();
+         }
+         return FALSE;
+     }
+};
+
+int button_clicked(DW::Clickable *classptr)
+{
+    DW::App *app = DW::App::Init();
+    app->MessageBox("Button", DW_MB_OK | DW_MB_INFORMATION, "Clicked!"); 
+    return TRUE; 
+}
+
+int exit_handler(DW::Clickable *classptr)
+{
+    DW::App *app = DW::App::Init();
+    if(app->MessageBox(APP_TITLE, DW_MB_YESNO | DW_MB_QUESTION, APP_EXIT) != 0) {
+        app->MainQuit();
+    }
+    return TRUE; 
+}
+
+int dwmain(int argc, char* argv[]) 
+{
+    DW::App *app = DW::App::Init(argc, argv, "org.dbsoft.dwindows.dwtestoo");
+
+    app->MessageBox(APP_TITLE, DW_MB_OK | DW_MB_INFORMATION, 
+                    "Warning: You are viewing the simplified version of this sample program.\n\n" \
+                    "This is because your compiler does not have lambda support.\n\n" \
+                    "Please upgrade to Clang 3.3, GCC 5 or Visual Studio 2015 to see the full sample.");
+
+    DWTest *window = new DWTest();
+    DW::Button *button = new DW::Button("Test window");
+
+    window->PackStart(button, DW_SIZE_AUTO, DW_SIZE_AUTO, TRUE, TRUE, 0);
+    button->ConnectClicked(&button_clicked);
+
+    DW::MenuBar *mainmenubar = window->MenuBarNew();
+
+    // add menus to the menubar
+    DW::Menu *menu = new DW::Menu();
+    DW::MenuItem *menuitem = menu->AppendItem("~Quit");
+    menuitem->ConnectClicked(&exit_handler);
+
+    // Add the "File" menu to the menubar...
+    mainmenubar->AppendItem("~File", menu);
+
+    window->Show();
+
+    app->Main();
+    app->Exit(0);
+
+    return 0;
+}
+#else
 class DWTest : public DW::Window
 {
 private:
-    const char *ResolveKeyName(int vk) {
-        const char *keyname;
+    std::string ResolveKeyName(int vk) {
+        std::string keyname;
         switch(vk) {
             case  VK_LBUTTON : keyname =  "VK_LBUTTON"; break;
             case  VK_RBUTTON : keyname =  "VK_RBUTTON"; break;
@@ -116,7 +195,7 @@ private:
         return keyname;
     }
 
-    const char *ResolveKeyModifiers(int mask) {
+    std::string ResolveKeyModifiers(int mask) {
         if((mask & KC_CTRL) && (mask & KC_SHIFT) && (mask & KC_ALT))
             return "KC_CTRL KC_SHIFT KC_ALT";
         else if((mask & KC_CTRL) && (mask & KC_SHIFT))
@@ -134,22 +213,21 @@ private:
         else return "none";
     }
 
-    char *ReadFile(char *filename)
-    {
+    char *ReadFile(std::string filename) {
         char *errors = NULL;
         FILE *fp=NULL;
 #ifdef __ANDROID__
         int fd = -1;
 
         // Special way to open for URIs on Android
-        if(strstr(filename, "://"))
+        if(strstr(filename.c_str(), "://"))
         {
-            fd = dw_file_open(filename, O_RDONLY);
+            fd = dw_file_open(filename.c_str(), O_RDONLY);
             fp = fdopen(fd, "r");
         }
         else
 #endif
-            fp = fopen(filename, "r");
+            fp = fopen(filename.c_str(), "r");
         if(!fp)
             errors = strerror(errno);
         else
@@ -186,14 +264,13 @@ private:
     }
 
     // When hpm is not NULL we are printing.. so handle things differently
-    void DrawFile(int row, int col, int nrows, int fheight, DW::Pixmap *hpm)
-    {
+    void DrawFile(int row, int col, int nrows, int fheight, DW::Pixmap *hpm) {
         DW::Pixmap *pixmap = hpm ? hpm : pixmap2;
         char buf[16] = {0};
         int i,y,fileline;
         char *pLine;
 
-        if(current_file)
+        if(current_file.size())
         {
             pixmap->SetForegroundColor(DW_CLR_WHITE);
             if(!hpm)
@@ -217,8 +294,7 @@ private:
     }
 
     // When hpm is not NULL we are printing.. so handle things differently 
-    void DrawShapes(int direct, DW::Pixmap *hpm)
-    {
+    void DrawShapes(int direct, DW::Pixmap *hpm) {
         DW::Pixmap *pixmap = hpm ? hpm : pixmap2;
         int width = (int)pixmap->GetWidth(), height = (int)pixmap->GetHeight();
         int x[7] = { 20, 180, 180, 230, 180, 180, 20 };
@@ -255,8 +331,7 @@ private:
         }
     }
 
-    void UpdateRender(void)
-    {
+    void UpdateRender(void) {
         switch(render_type)
         {
             case SHAPES_DOUBLE_BUFFERED:
@@ -272,9 +347,9 @@ private:
     }
 
     // Request that the render widgets redraw...
-    // If not using direct rendering, call update_render() to
+    // If not using direct rendering, call UpdateRender() to
     // redraw the in memory pixmaps. Then trigger the expose events.
-    // Expose will call update_render() to draw directly or bitblt the pixmaps.
+    // Expose will call UpdateRender() to draw directly or bitblt the pixmaps.
     void RenderDraw() {
         // If we are double buffered, draw to the pixmaps
         if(render_type != SHAPES_DIRECT)
@@ -282,6 +357,218 @@ private:
         // Trigger expose event
         render1->Redraw();
         render2->Redraw();
+    }
+
+    DW::Menu *ItemContextMenu(DW::StatusText *status_text, std::string text) {
+        DW::Menu *menu = new DW::Menu();
+        DW::Menu *submenu = new DW::Menu();
+        DW::MenuItem *menuitem = submenu->AppendItem("File", 0L, TRUE);
+        menuitem->ConnectClicked([status_text, text]() -> int { status_text->SetText(text); return TRUE; });
+        menuitem->ConnectClicked([status_text, text]() -> int { status_text->SetText(text); return TRUE; });
+        menuitem = submenu->AppendItem("Date", 0L, TRUE);
+        menuitem->ConnectClicked([status_text, text]() -> int { status_text->SetText(text); return TRUE; });
+        menuitem = submenu->AppendItem("Size", 0L, TRUE);
+        menuitem->ConnectClicked([status_text, text]() -> int { status_text->SetText(text); return TRUE; });
+        menuitem = submenu->AppendItem("None", 0L, TRUE);
+        menuitem->ConnectClicked([status_text, text]() -> int { status_text->SetText(text); return TRUE; });
+
+        menuitem = menu->AppendItem("Sort", submenu);
+
+        menuitem = menu->AppendItem("Make Directory");
+        menuitem->ConnectClicked([status_text, text]() -> int { status_text->SetText(text); return TRUE; });
+
+        menuitem = menu->AppendItem(DW_MENU_SEPARATOR);
+        menuitem = menu->AppendItem("Rename Entry");
+        menuitem->ConnectClicked([status_text, text]() -> int { status_text->SetText(text); return TRUE; });
+
+        menuitem = menu->AppendItem("Delete Entry");
+        menuitem->ConnectClicked([status_text, text]() -> int { status_text->SetText(text); return TRUE; });
+
+        menuitem = menu->AppendItem(DW_MENU_SEPARATOR);
+        menuitem = menu->AppendItem("View File");
+        menuitem->ConnectClicked([status_text, text]() -> int { status_text->SetText(text); return TRUE; });
+
+        return menu;
+    }
+
+    DW::ComboBox *ColorCombobox(void) {
+        DW::ComboBox *combobox = new DW::ComboBox("DW_CLR_DEFAULT");
+
+        combobox->Append("DW_CLR_DEFAULT");
+        combobox->Append("DW_CLR_BLACK");
+        combobox->Append("DW_CLR_DARKRED");
+        combobox->Append("DW_CLR_DARKGREEN");
+        combobox->Append("DW_CLR_BROWN");
+        combobox->Append("DW_CLR_DARKBLUE");
+        combobox->Append("DW_CLR_DARKPINK");
+        combobox->Append("DW_CLR_DARKCYAN");
+        combobox->Append("DW_CLR_PALEGRAY");
+        combobox->Append("DW_CLR_DARKGRAY");
+        combobox->Append("DW_CLR_RED");
+        combobox->Append("DW_CLR_GREEN");
+        combobox->Append("DW_CLR_YELLOW");
+        combobox->Append("DW_CLR_BLUE");
+        combobox->Append("DW_CLR_PINK");
+        combobox->Append("DW_CLR_CYAN");
+        combobox->Append("DW_CLR_WHITE");
+        return combobox;
+    }
+
+    unsigned long ComboboxColor(std::string colortext) {
+        unsigned long color = DW_CLR_DEFAULT;
+
+        if(colortext.compare("DW_CLR_BLACK") == 0)
+            color = DW_CLR_BLACK;
+        else if(colortext.compare("DW_CLR_DARKRED") == 0)
+            color = DW_CLR_DARKRED;
+        else if(colortext.compare("DW_CLR_DARKGREEN") == 0)
+            color = DW_CLR_DARKGREEN;
+        else if(colortext.compare("DW_CLR_BROWN") == 0)
+            color = DW_CLR_BROWN;
+        else if(colortext.compare("DW_CLR_DARKBLUE") == 0)
+            color = DW_CLR_DARKBLUE;
+        else if(colortext.compare("DW_CLR_DARKPINK") == 0)
+            color = DW_CLR_DARKPINK;
+        else if(colortext.compare("DW_CLR_DARKCYAN") == 0)
+            color = DW_CLR_DARKCYAN;
+        else if(colortext.compare("DW_CLR_PALEGRAY") == 0)
+            color = DW_CLR_PALEGRAY;
+        else if(colortext.compare("DW_CLR_DARKGRAY") == 0)
+            color = DW_CLR_DARKGRAY;
+        else if(colortext.compare("DW_CLR_RED") == 0)
+            color = DW_CLR_RED;
+        else if(colortext.compare("DW_CLR_GREEN") == 0)
+            color = DW_CLR_GREEN;
+        else if(colortext.compare("DW_CLR_YELLOW") == 0)
+            color = DW_CLR_YELLOW;
+        else if(colortext.compare("DW_CLR_BLUE") == 0)
+            color = DW_CLR_BLUE;
+        else if(colortext.compare("DW_CLR_PINK") == 0)
+            color = DW_CLR_PINK;
+        else if(colortext.compare("DW_CLR_CYAN") == 0)
+            color = DW_CLR_CYAN;
+        else if(colortext.compare("DW_CLR_WHITE") == 0)
+            color = DW_CLR_WHITE;
+
+        return color;
+    }
+
+    void MLESetFont(DW::MLE *mle, int fontsize, std::string fontname) {
+        if(fontname.size() && fontsize > 0) {
+            mle->SetFont(std::to_string(fontsize) + "." + fontname);
+        }
+        mle->SetFont(NULL);
+    }
+
+    // Thread and Event functions
+    void UpdateMLE(DW::MLE *threadmle, std::string text, DW::Mutex *mutex) {
+        static unsigned int pos = 0;
+
+        // Protect pos from being changed by different threads
+        if(mutex)
+            mutex->Lock();
+        pos = threadmle->Import(text, pos);
+        threadmle->SetCursor(pos);
+        if(mutex)
+            mutex->Unlock();
+    }
+
+    void RunThread(int threadnum, DW::Mutex *mutex, DW::Event *controlevent, DW::Event *workevent, DW::MLE *threadmle) {
+        std::string buf;
+
+        buf = "Thread " + std::to_string(threadnum) + " started.\r\n";
+        UpdateMLE(threadmle, buf, mutex);
+
+        // Increment the ready count while protected by mutex
+        mutex->Lock();
+        ready++;
+        // If all 4 threads have incrememted the ready count...
+        // Post the control event semaphore so things will get started.
+        if(ready == 4)
+            controlevent->Post();
+        mutex->Unlock();
+
+        while(!finished)
+        {
+            int result = workevent->Wait(2000);
+
+            if(result == DW_ERROR_TIMEOUT)
+            {
+                buf = "Thread " + std::to_string(threadnum) + " timeout waiting for event.\r\n";
+                UpdateMLE(threadmle, buf, mutex);
+            }
+            else if(result == DW_ERROR_NONE)
+            {
+                buf = "Thread " + std::to_string(threadnum) + " doing some work.\r\n";
+                UpdateMLE(threadmle, buf, mutex);
+                // Pretend to do some work
+                app->MainSleep(1000 * threadnum);
+
+                // Increment the ready count while protected by mutex
+                mutex->Lock();
+                ready++;
+                buf = "Thread " + std::to_string(threadnum) + " work done. ready=" + std::to_string(ready);
+                // If all 4 threads have incrememted the ready count...
+                // Post the control event semaphore so things will get started.
+                if(ready == 4)
+                {
+                    controlevent->Post();
+                    buf += " Control posted.";
+                }
+                mutex->Unlock();
+                buf += "\r\n";
+                UpdateMLE(threadmle, buf, mutex);
+            }
+            else
+            {
+                buf = "Thread " + std::to_string(threadnum) + " error " + std::to_string(result) + ".\r\n";
+                UpdateMLE(threadmle, buf, mutex);
+                app->MainSleep(10000);
+            }
+        }
+        buf = "Thread " + std::to_string(threadnum) + " finished.\r\n";
+        UpdateMLE(threadmle, buf, mutex);
+    }
+
+    void ControlThread(DW::Mutex *mutex, DW::Event *controlevent, DW::Event *workevent, DW::MLE *threadmle) {
+        int inprogress = 5;
+        std::string buf;
+
+        while(inprogress)
+        {
+            int result = controlevent->Wait(2000);
+
+            if(result == DW_ERROR_TIMEOUT)
+            {
+                UpdateMLE(threadmle, "Control thread timeout waiting for event.\r\n", mutex);
+            }
+            else if(result == DW_ERROR_NONE)
+            {
+                // Reset the control event
+                controlevent->Reset();
+                ready = 0;
+                buf = "Control thread starting worker threads. Inprogress=" + std::to_string(inprogress) + "\r\n";
+                UpdateMLE(threadmle, buf, mutex);
+                // Start the work threads
+                workevent->Post();
+                app->MainSleep(100);
+                // Reset the work event
+                workevent->Reset();
+                inprogress--;
+            }
+            else
+            {
+                buf = "Control thread error " + std::to_string(result) + ".\r\n";
+                UpdateMLE(threadmle, buf, mutex);
+                app->MainSleep(10000);
+            }
+        }
+        // Tell the other threads we are done
+        finished = TRUE;
+        workevent->Post();
+        // Close the control event
+        controlevent->Close();
+        UpdateMLE(threadmle, "Control thread finished.\r\n", mutex);
     }
 
     // Add the menus to the window
@@ -353,13 +640,12 @@ private:
     }
     
     // Notebook page 1
-    void CreateInput(DW::Box *notebookbox)
-    {
+    void CreateInput(DW::Box *notebookbox) {
         DW::Box *lbbox = new DW::Box(DW_VERT, 10);
 
         notebookbox->PackStart(lbbox, 150, 70, TRUE, TRUE, 0);
 
-        /* Copy and Paste */
+        // Copy and Paste
         DW::Box *browsebox = new DW::Box(DW_HORZ, 0);
         lbbox->PackStart(browsebox, 0, 0, FALSE, FALSE, 0);
 
@@ -373,7 +659,7 @@ private:
         DW::Button *pastebutton = new DW::Button("Paste");
         browsebox->PackStart(pastebutton, FALSE, FALSE, 0);
 
-        /* Archive Name */
+        // Archive Name
         DW::Text *stext = new DW::Text("File to browse");
         stext->SetStyle(DW_DT_VCENTER);
         lbbox->PackStart(stext, 130, 15, TRUE, TRUE, 2);
@@ -409,12 +695,12 @@ private:
 
         cancelbutton->Unpack();
         buttonbox->PackStart(cancelbutton, 130, 30, TRUE, TRUE, 2);
-        //this->ClickDefault(cancelbutton);
+        this->ClickDefault(cancelbutton);
 
         DW::Button *colorchoosebutton = new DW::Button("Color Chooser Dialog");
-        buttonbox->PackStart(colorchoosebutton, 130, 30, TRUE, TRUE, 2);
+        buttonbox->PackAtIndex(colorchoosebutton, 1, 130, 30, TRUE, TRUE, 2);
 
-        /* Set some nice fonts and colors */
+        // Set some nice fonts and colors
         lbbox->SetColor(DW_CLR_DARKCYAN, DW_CLR_PALEGRAY);
         buttonbox->SetColor(DW_CLR_DARKCYAN, DW_CLR_PALEGRAY);
         okbutton->SetColor(DW_CLR_PALEGRAY, DW_CLR_DARKCYAN);
@@ -432,21 +718,19 @@ private:
         // Connect signals
         browsefilebutton->ConnectClicked([this, entryfield, copypastefield]() -> int 
         {
-            char *tmp = this->app->FileBrowse("Pick a file", "dwtest.c", "c", DW_FILE_OPEN);
-            if(tmp)
+            std::string tmp = this->app->FileBrowse("Pick a file", "dwtest.c", "c", DW_FILE_OPEN);
+            if(tmp.size())
             {
                 char *errors = ReadFile(tmp);
-                const char *title = "New file load";
-                const char *image = "image/test.png";
+                std::string title = "New file load";
+                std::string image = "image/test.png";
                 DW::Notification *notification;
 
                 if(errors)
-                    notification = new DW::Notification(title, image, APP_TITLE " failed to load the file into the file browser.");
+                    notification = new DW::Notification(title, image, std::string(APP_TITLE) + " failed to load the file into the file browser.");
                 else
-                    notification = new DW::Notification(title, image, APP_TITLE " loaded the file into the file browser on the Render tab, with \"File Display\" selected from the drop down list.");
+                    notification = new DW::Notification(title, image, std::string(APP_TITLE) + " loaded the file into the file browser on the Render tab, with \"File Display\" selected from the drop down list.");
 
-                if(current_file)
-                    this->app->Free(current_file);
                 current_file = tmp;
                 entryfield->SetText(current_file);
                 current_col = current_row = 0;
@@ -464,17 +748,16 @@ private:
         
         browsefolderbutton->ConnectClicked([this]() -> int 
         {
-            char *tmp = this->app->FileBrowse("Pick a folder", ".", "c", DW_DIRECTORY_OPEN);
-            this->app->Debug("Folder picked: %s\n", tmp ? tmp : "None");
+            std::string tmp = this->app->FileBrowse("Pick a folder", ".", "c", DW_DIRECTORY_OPEN);
+            this->app->Debug("Folder picked: " + (tmp.size() ? tmp : "None") + "\n");
             return FALSE;
         });
 
         copybutton->ConnectClicked([this, copypastefield, entryfield]() -> int {
-            char *test = copypastefield->GetText();
+            std::string test = copypastefield->GetText();
 
-            if(test) {
+            if(test.size()) {
                 this->app->SetClipboard(test);
-                this->app->Free(test);
             }
             entryfield->SetFocus();
             return TRUE; 
@@ -482,10 +765,9 @@ private:
 
         pastebutton->ConnectClicked([this, copypastefield]() -> int 
         {
-            char *test = this->app->GetClipboard();
-            if(test) {
+            std::string test = this->app->GetClipboard();
+            if(test.size()) {
                 copypastefield->SetText(test);
-                this->app->Free(test);
             }
             return TRUE;
         });
@@ -523,10 +805,11 @@ private:
         });
     }
 
+    // Notebook page 2
     void CreateRender(DW::Box *notebookbox) {
         int vscrollbarwidth, hscrollbarheight;
         wchar_t widestring[100] = L"DWTest Wide";
-        char *utf8string = dw_wchar_to_utf8(widestring);
+        char *utf8string = app->WideToUTF8(widestring);
 
         // create a box to pack into the notebook page
         DW::Box *pagebox = new DW::Box(DW_HORZ, 2);
@@ -630,15 +913,10 @@ private:
             image = new DW::Pixmap(render1, "~/test");
         if(!image || !image->GetHPIXMAP())
         {
-            char *appdir = app->GetDir();
-            char pathbuff[1025] = {0};
-            int pos = (int)strlen(appdir);
-            
-            strncpy(pathbuff, appdir, 1024);
-            pathbuff[pos] = DW_DIR_SEPARATOR;
-            pos++;
-            strncpy(&pathbuff[pos], "test", 1024-pos);
-            image = new DW::Pixmap(render1, pathbuff);
+            std::string appdir = app->GetDir();
+            appdir.append(std::string(1, DW_DIR_SEPARATOR));
+            appdir.append("test");
+            image = new DW::Pixmap(render1, appdir);
         }
         if(image)
             image->SetTransparentColor(DW_CLR_WHITE);
@@ -707,53 +985,53 @@ private:
             return TRUE;
         });
 
-        render2->ConnectKeyPress([this, status1](char ch, int vk, int state, char *utf8) -> int
+        render2->ConnectKeyPress([this, status1](char ch, int vk, int state, std::string utf8) -> int
         {
-            char tmpbuf[101] = {0};
+            std::string buf = "Key: ";
+
             if(ch)
-                snprintf(tmpbuf, 100, "Key: %c(%d) Modifiers: %s(%d) utf8 %s", ch, ch, this->ResolveKeyModifiers(state), state,  utf8);
+                buf += std::string(1, ch) + "(" + std::to_string((int)ch) + ")";
             else
-                snprintf(tmpbuf, 100, "Key: %s(%d) Modifiers: %s(%d) utf8 %s", this->ResolveKeyName(vk), vk, ResolveKeyModifiers(state), state, utf8);
-            status1->SetText(tmpbuf);
+                buf += ResolveKeyName(vk) + "(" + std::to_string(vk) + ")";
+
+            buf += " Modifiers: " + ResolveKeyModifiers(state) + "(" + std::to_string(state) + ") utf8 " + utf8;
+
+            status1->SetText(buf);
             return FALSE;
         });
 
         hscrollbar->ConnectValueChanged([this, status1](int value) -> int
         {
-            char tmpbuf[101] = {0};
+            std::string buf = "Row:" + std::to_string(current_row) + " Col:" + std::to_string(current_col) + " Lines:" + std::to_string(num_lines) + " Cols:" + std::to_string(max_linewidth);
 
             this->current_col = value;
-            snprintf(tmpbuf, 100, "Row:%d Col:%d Lines:%d Cols:%d", current_row,current_col,num_lines,max_linewidth);
-            status1->SetText(tmpbuf);
+            status1->SetText(buf);
             this->RenderDraw();
             return TRUE;
         });
 
         vscrollbar->ConnectValueChanged([this, status1](int value) -> int
         {
-            char tmpbuf[101] = {0};
+            std::string buf = "Row:" + std::to_string(current_row) + " Col:" + std::to_string(current_col) + " Lines:" + std::to_string(num_lines) + " Cols:" + std::to_string(max_linewidth);
 
             this->current_row = value;
-            snprintf(tmpbuf, 100, "Row:%d Col:%d Lines:%d Cols:%d", current_row,current_col,num_lines,max_linewidth);
-            status1->SetText(tmpbuf);
+            status1->SetText(buf);
             this->RenderDraw();
             return TRUE;
         });
 
         render2->ConnectMotionNotify([status2](int x, int y, int buttonmask) -> int
         {
-            char buf[201] = {0};
+            std::string buf = "motion_notify: " + std::to_string(x) + "x" + std::to_string(y) + " buttons " + std::to_string(buttonmask);
 
-            snprintf(buf, 200, "motion_notify: %dx%d buttons %d", x, y, buttonmask);
             status2->SetText(buf);
             return FALSE;
         });
 
         render2->ConnectButtonPress([status2](int x, int y, int buttonmask) -> int
         {
-            char buf[201] = {0};
+            std::string buf = "button_press: " + std::to_string(x) + "x" + std::to_string(y) + " buttons " + std::to_string(buttonmask);
 
-            snprintf(buf, 200, "button_press: %dx%d buttons %d", x, y, buttonmask);
             status2->SetText(buf);
             return FALSE;
         });
@@ -809,25 +1087,25 @@ private:
                }
                else if(page_num == 1)
                {
-                   /* Get the font size for this printer context... */
+                   // Get the font size for this printer context...
                    int fheight, fwidth;
 
-                   /* If we have a file to display... */
-                   if(current_file)
+                   // If we have a file to display...
+                   if(current_file.size())
                    {
                        int nrows;
 
-                       /* Calculate new dimensions */
+                       // Calculate new dimensions
                        pixmap->GetTextExtents("(g", NULL, &fheight);
                        nrows = (int)(pixmap->GetHeight() / fheight);
 
-                       /* Do the actual drawing */
+                       // Do the actual drawing
                        this->DrawFile(0, 0, nrows, fheight, pixmap);
                    }
                    else
                    {
-                       /* We don't have a file so center an error message on the page */
-                       const char *text = "No file currently selected!";
+                       // We don't have a file so center an error message on the page
+                       std::string text = "No file currently selected!";
                        int posx, posy;
 
                        pixmap->GetTextExtents(text, &fwidth, &fheight);
@@ -845,7 +1123,7 @@ private:
             return TRUE;
         });
 
-        rendcombo->ConnectListSelect([this](int index) -> int 
+        rendcombo->ConnectListSelect([this](unsigned int index) -> int 
         {
             if(index != this->render_type)
             {
@@ -872,12 +1150,639 @@ private:
 
         app->TaskBarInsert(render1, fileicon, "DWTest");
     }
+
+    // Notebook page 3
+    void CreateTree(DW::Box *notebookbox) {
+        // create a box to pack into the notebook page
+        DW::ListBox *listbox = new DW::ListBox(TRUE);
+        notebookbox->PackStart(listbox, 500, 200, TRUE, TRUE, 0);
+        listbox->Append("Test 1");
+        listbox->Append("Test 2");
+        listbox->Append("Test 3");
+        listbox->Append("Test 4");
+        listbox->Append("Test 5");
+
+        // now a tree area under this box 
+        DW::Tree *tree = new DW::Tree();
+        if(tree->GetHWND())
+        {
+            notebookbox->PackStart(tree, 500, 200, TRUE, TRUE, 1);
+
+            // and a status area to see whats going on
+            DW::StatusText *tree_status = new DW::StatusText();
+            notebookbox->PackStart(tree_status, 100, DW_SIZE_AUTO, TRUE, FALSE, 1);
+
+            // set up our signal trappers...
+            tree->ConnectItemContext([this, tree_status](std::string text, int x, int y, void *data) -> int
+            {
+                DW::Menu *popupmenu = ItemContextMenu(tree_status, "Item context menu clicked.");
+                std::string buf = "DW_SIGNAL_ITEM_CONTEXT: Text: " + text + " x: " + std::to_string(x) + " y: " + std::to_string(y);
+                tree_status->SetText(buf);
+                popupmenu->Popup(this, x, y);
+                return FALSE;
+            });
+            tree->ConnectItemSelect([tree_status](HTREEITEM item, std::string text, void *itemdata)
+            {
+                std::string sitem = std::to_string(DW_POINTER_TO_UINT(item));
+                std::string sitemdata = std::to_string(DW_POINTER_TO_UINT(itemdata));
+                std::string buf = "DW_SIGNAL_ITEM_SELECT: Item: " + sitem + " Text: " + text + " Itemdata: " + sitemdata;
+                tree_status->SetText(buf);
+                return FALSE;
+            });
+
+            HTREEITEM t1 = tree->Insert("tree folder 1", foldericon, DW_NULL, DW_INT_TO_POINTER(1));
+            HTREEITEM t2 = tree->Insert("tree folder 2", foldericon, DW_NULL, DW_INT_TO_POINTER(2));
+            tree->Insert("tree file 1", fileicon, t1, DW_INT_TO_POINTER(3));
+            tree->Insert("tree file 2", fileicon, t1, DW_INT_TO_POINTER(4));
+            tree->Insert("tree file 3", fileicon, t2, DW_INT_TO_POINTER(5));
+            tree->Insert("tree file 4", fileicon, t2, DW_INT_TO_POINTER(6));
+            tree->Change(t1, "tree folder 1", foldericon);
+            tree->Change(t2, "tree folder 2", foldericon);
+            tree->SetData(t2, DW_INT_TO_POINTER(100));
+            tree->Expand(t1);
+            int t1data = DW_POINTER_TO_INT(tree->GetData(t1));
+            int t2data = DW_POINTER_TO_INT(tree->GetData(t2));
+            std::string message = "t1 title \"" + tree->GetTitle(t1) + "\" data " + std::to_string(t1data) + " t2 data " + std::to_string(t2data) + "\n";
+
+            this->app->Debug(message);
+        }
+        else
+        {
+            DW::Text *text = new DW::Text("Tree widget not available.");
+            notebookbox->PackStart(text, 500, 200, TRUE, TRUE, 1);
+        }
+    }
+
+    // Page 4 - Container
+    void CreateContainer(DW::Box *notebookbox) {
+        CTIME time;
+        CDATE date;
+
+        // create a box to pack into the notebook page
+        DW::Box *containerbox = new DW::Box(DW_HORZ, 2);
+        notebookbox->PackStart(containerbox, 500, 200, TRUE, TRUE, 0);
+
+        // Add a word wrap checkbox
+        DW::Box *hbox = new DW::Box(DW_HORZ, 0);
+
+        DW::CheckBox *checkbox = new DW::CheckBox("Word wrap");
+        hbox->PackStart(checkbox,  FALSE, TRUE, 1);
+        DW::Text *text = new DW::Text("Foreground:");
+        text->SetStyle(DW_DT_VCENTER);
+        hbox->PackStart(text, FALSE, TRUE, 1);
+        DW::ComboBox *mlefore = ColorCombobox();
+        hbox->PackStart(mlefore, 150, DW_SIZE_AUTO, TRUE, FALSE, 1);
+        text = new DW::Text("Background:");
+        text->SetStyle(DW_DT_VCENTER);
+        hbox->PackStart(text, FALSE, TRUE, 1);
+        DW::ComboBox *mleback = ColorCombobox();
+        hbox->PackStart(mleback, 150, DW_SIZE_AUTO, TRUE, FALSE, 1);
+        checkbox->Set(TRUE);
+        text = new DW::Text("Font:");
+        text->SetStyle(DW_DT_VCENTER);
+        hbox->PackStart(text, FALSE, TRUE, 1);
+        DW::SpinButton *fontsize = new DW::SpinButton("9");
+        hbox->PackStart(fontsize, FALSE, FALSE, 1);
+        fontsize->SetLimits(100, 5);
+        fontsize->SetPos(9);
+        DW::ComboBox *fontname = new DW::ComboBox("Default");
+        fontname->Append("Default");
+        fontname->Append("Arial");
+        fontname->Append("Geneva");
+        fontname->Append("Verdana");
+        fontname->Append("Helvetica");
+        fontname->Append("DejaVu Sans");
+        fontname->Append("Times New Roman");
+        fontname->Append("Times New Roman Bold");
+        fontname->Append("Times New Roman Italic");
+        fontname->Append("Times New Roman Bold Italic");
+        hbox->PackStart(fontname, 150, DW_SIZE_AUTO, TRUE, FALSE, 1);
+        notebookbox->PackStart(hbox, TRUE, FALSE, 1);
+
+        // now a container area under this box
+        DW::Filesystem *container = new DW::Filesystem(TRUE);
+        notebookbox->PackStart(container, 500, 200, TRUE, FALSE, 1);
+
+        // and a status area to see whats going on
+        DW::StatusText *container_status = new DW::StatusText();
+        notebookbox->PackStart(container_status, 100, DW_SIZE_AUTO, TRUE, FALSE, 1);
+
+        std::vector<std::string> titles = { "Type", "Size", "Time", "Date" };
+        std::vector<unsigned long> flags = {
+            DW_CFA_BITMAPORICON | DW_CFA_LEFT | DW_CFA_HORZSEPARATOR | DW_CFA_SEPARATOR,
+            DW_CFA_ULONG | DW_CFA_RIGHT | DW_CFA_HORZSEPARATOR | DW_CFA_SEPARATOR,
+            DW_CFA_TIME | DW_CFA_CENTER | DW_CFA_HORZSEPARATOR | DW_CFA_SEPARATOR,
+            DW_CFA_DATE | DW_CFA_LEFT | DW_CFA_HORZSEPARATOR | DW_CFA_SEPARATOR };
+
+
+        container->SetColumnTitle("Test");
+        container->Setup(flags, titles);
+        container->SetStripe(DW_CLR_DEFAULT, DW_CLR_DEFAULT);
+        container->Alloc(3);
+
+        for(int z=0;z<3;z++)
+        {
+            std::string names = "We can now allocate from the stack: Item: " + std::to_string(z);
+            HICN thisicon = (z == 0 ? foldericon : fileicon);
+
+            unsigned long size = z*100;
+            container->SetFile(z, "Filename " + std::to_string(z+1), thisicon);
+            container->SetItem(0, z, &thisicon);
+            container->SetItem(1, z, &size);
+
+            time.seconds = z+10;
+            time.minutes = z+10;
+            time.hours = z+10;
+            container->SetItem(2, z, &time);
+
+            date.day = z+10;
+            date.month = z+10;
+            date.year = z+2000;
+            container->SetItem(3, z, &date);
+
+            container->SetRowTitle(z, names);
+            container->SetRowData(z, DW_INT_TO_POINTER(z));
+        }
+
+        container->Insert();
+
+        container->Alloc(1);
+        container->SetFile(0, "Yikes", foldericon);
+        unsigned long size = 324;
+        container->SetItem(0, 0, &foldericon);
+        container->SetItem(1, 0, &size);
+        container->SetItem(2, 0, &time);
+        container->SetItem(3, 0, &date);
+        container->SetRowTitle(0, "Extra");
+
+        container->Insert();
+        container->Optimize();
+
+        DW::MLE *container_mle = new DW::MLE();
+        containerbox->PackStart(container_mle, 500, 200, TRUE, TRUE, 0);
+
+        mle_point = container_mle->Import("", -1);
+        mle_point = container_mle->Import("[" + std::to_string(mle_point) + "]", mle_point);
+        mle_point = container_mle->Import("[" + std::to_string(mle_point) + "]abczxydefijkl", mle_point);
+        container_mle->Delete(9, 3);
+        mle_point = container_mle->Import("gh", 12);
+        unsigned long newpoint;
+        container_mle->GetSize(&newpoint, NULL);
+        mle_point = (int)newpoint;
+        mle_point = container_mle->Import("[" + std::to_string(mle_point) + "]\r\n\r\n", mle_point);
+        container_mle->SetCursor(mle_point);
+
+        // connect our event trappers...
+        container->ConnectItemEnter([container_status](std::string text, void *itemdata) -> int
+        {
+            std::string buf = "DW_SIGNAL_ITEM_ENTER: Text: " + text + "Itemdata: " + std::to_string(DW_POINTER_TO_UINT(itemdata));
+            container_status->SetText(buf);
+            return FALSE;
+        });
+
+        container->ConnectItemContext([this, container_status](std::string text, int x, int y, void *itemdata) -> int
+        {
+            DW::Menu *popupmenu = ItemContextMenu(container_status, "Item context menu clicked.");
+            std::string buf = "DW_SIGNAL_ITEM_CONTEXT: Text: " + text + " x: " + std::to_string(x) + " y: " + 
+                std::to_string(y) + " Itemdata: " + std::to_string(DW_POINTER_TO_UINT(itemdata));
+
+            container_status->SetText(buf);
+            popupmenu->Popup(this, x, y);
+            return FALSE;
+        });
+
+        container->ConnectItemSelect([this, container_mle, container, container_status](HTREEITEM item, std::string text, void *itemdata) -> int
+        {
+            std::string sitemdata = std::to_string(DW_POINTER_TO_UINT(itemdata));
+            std::string sitem = std::to_string(DW_POINTER_TO_UINT(item));
+            std::string buf = "DW_SIGNAL_ITEM_SELECT:Item: " + sitem + " Text: " + text + " Itemdata: " + sitemdata;
+            container_status->SetText(buf);
+            buf = "\r\nDW_SIGNAL_ITEM_SELECT: Item: " + sitem + " Text: " + text + " Itemdata: " +  sitemdata + "\r\n";
+            this->mle_point = container_mle->Import(buf, mle_point);
+            std::string str = container->QueryStart(DW_CRA_SELECTED);
+            while(str.size())
+            {
+                std::string buf = "Selected: " + str + "\r\n";
+                mle_point = container_mle->Import(buf, mle_point);
+                str = container->QueryNext(DW_CRA_SELECTED);
+            }
+            // Make the last inserted point the cursor location
+            container_mle->SetCursor(mle_point);
+            // set the details of item 0 to new data
+            this->app->Debug("In cb: icon: %x\n", DW_POINTER_TO_INT(fileicon));
+            container->ChangeFile(0, "new data", fileicon);
+            unsigned long size = 999;
+            this->app->Debug("In cb: icon: %x\n",  DW_POINTER_TO_INT(fileicon));
+            container->ChangeItem(1, 0, &size);
+            return FALSE;
+        });
+
+        container->ConnectColumnClick([container, container_status](int column_num) -> int
+        {
+            std::string type_string = "Filename";
+
+            if(column_num != 0)
+            {
+                int column_type = container->GetColumnType(column_num-1);
+
+                if(column_type == DW_CFA_STRING)
+                    type_string = "String";
+                else if(column_type == DW_CFA_ULONG)
+                    type_string ="ULong";
+                else if(column_type == DW_CFA_DATE)
+                    type_string = "Date";
+                else if(column_type == DW_CFA_TIME)
+                    type_string ="Time";
+                else if(column_type == DW_CFA_BITMAPORICON)
+                    type_string = "BitmapOrIcon";
+                else
+                    type_string = "Unknown";
+            }
+            std::string buf = "DW_SIGNAL_COLUMN_CLICK: Column: " + std::to_string(column_num) + " Type: " + type_string;
+            container_status->SetText(buf);
+            return FALSE;
+        });
+
+        mlefore->ConnectListSelect([this, mlefore, mleback, container_mle](unsigned int pos) -> int
+        {
+            ULONG fore = DW_CLR_DEFAULT, back = DW_CLR_DEFAULT;
+
+            std::string colortext = mlefore->GetListText(pos);
+            fore = ComboboxColor(colortext);
+            std::string text = mleback->GetText();
+
+            if(text.size()) {
+                back = ComboboxColor(text);
+            }
+            container_mle->SetColor(fore, back);
+            return FALSE;
+        });
+
+        mleback->ConnectListSelect([this, mlefore, mleback, container_mle](unsigned int pos) -> int
+        {
+            ULONG fore = DW_CLR_DEFAULT, back = DW_CLR_DEFAULT;
+
+            std::string colortext = mleback->GetListText(pos);
+            back = ComboboxColor(colortext);
+            std::string text = mlefore->GetText();
+
+            if(text.size()) {
+                fore = ComboboxColor(text);
+            }
+            container_mle->SetColor(fore, back);
+            return FALSE;
+        });
+
+        fontname->ConnectListSelect([this, fontname, fontsize, container_mle](unsigned int pos) -> int
+        {
+            std::string font = fontname->GetListText(pos);
+            MLESetFont(container_mle, (int)fontsize->GetPos(), font.compare("Default") == 0 ? NULL : font);
+            return FALSE;
+        });
+
+        fontsize->ConnectValueChanged([this, fontname, container_mle](int size) -> int
+        {
+            std::string font = fontname->GetText();
+
+            if(font.size()) {
+                MLESetFont(container_mle, size, font.compare("Default") == 0 ? NULL : font);
+            }
+            else
+                MLESetFont(container_mle, size, NULL);
+            return FALSE;
+        });
+    }
+
+    // Page 5 - Buttons
+    void CreateButtons(DW::Box *notebookbox) {
+        // create a box to pack into the notebook page
+        DW::Box *buttonsbox = new DW::Box(DW_VERT, 2);
+        notebookbox->PackStart(buttonsbox, 25, 200, TRUE, TRUE, 0);
+        buttonsbox->SetColor(DW_CLR_RED, DW_CLR_RED);
+
+        DW::Box *calbox = new DW::Box(DW_HORZ, 0);
+        notebookbox->PackStart(calbox, 0, 0, TRUE, FALSE, 1);
+        DW::Calendar *cal = new DW::Calendar();
+        calbox->PackStart(cal, TRUE, FALSE, 0);
+
+        cal->SetDate(2019, 4, 30);
+
+        // Create our file toolbar boxes...
+        DW::Box *buttonboxperm = new DW::Box(DW_VERT, 0);
+        buttonsbox->PackStart(buttonboxperm, 25, 0, FALSE, TRUE, 2);
+        buttonboxperm->SetColor(DW_CLR_WHITE, DW_CLR_WHITE);
+        DW::BitmapButton *topbutton = new DW::BitmapButton("Top Button", fileiconpath);
+        buttonboxperm->PackStart(topbutton, 100, 30, FALSE, FALSE, 0 );
+        buttonboxperm->PackStart(DW_NOHWND, 25, 5, FALSE, FALSE, 0);
+        DW::BitmapButton *iconbutton = new DW::BitmapButton( "Folder Icon", foldericonpath);
+        buttonsbox->PackStart(iconbutton, 25, 25, FALSE, FALSE, 0);
+        iconbutton->ConnectClicked([this, iconbutton]() -> int
+        {
+            static int isfoldericon = 0;
+
+            isfoldericon = !isfoldericon;
+            if(isfoldericon)
+            {
+                iconbutton->Set(this->fileiconpath);
+                iconbutton->SetTooltip("File Icon");
+            }
+            else
+            {
+                iconbutton->Set(this->foldericonpath);
+                iconbutton->SetTooltip("Folder Icon");
+            }
+            return FALSE;
+        });
+
+        DW::Box *filetoolbarbox = new DW::Box(DW_VERT, 0);
+        buttonboxperm->PackStart(filetoolbarbox, 0, 0, TRUE, TRUE, 0);
+
+        DW::BitmapButton *button = new DW::BitmapButton("Empty image. Should be under Top button", 0, "junk");
+        filetoolbarbox->PackStart(button, 25, 25, FALSE, FALSE, 0);
+        button->ConnectClicked([buttonsbox]() -> int 
+        {
+            buttonsbox->SetColor(DW_CLR_RED, DW_CLR_RED);
+            return TRUE;
+        });
+        filetoolbarbox->PackStart(DW_NOHWND, 25, 5, FALSE, FALSE, 0);
+
+        button = new DW::BitmapButton("A borderless bitmapbitton", 0, foldericonpath);
+        filetoolbarbox->PackStart(button, 25, 25, FALSE, FALSE, 0);
+        button->ConnectClicked([buttonsbox]() -> int 
+        {
+            buttonsbox->SetColor(DW_CLR_YELLOW, DW_CLR_YELLOW);
+            return TRUE;
+        });
+        filetoolbarbox->PackStart(DW_NOHWND, 25, 5, FALSE, FALSE, 0);
+        button->SetStyle(DW_BS_NOBORDER);
+
+        DW::BitmapButton *perbutton = new DW::BitmapButton("A button from data", 0, foldericonpath);
+        filetoolbarbox->PackStart(perbutton, 25, 25, FALSE, FALSE, 0);
+        filetoolbarbox->PackStart(DW_NOHWND, 25, 5, FALSE, FALSE, 0 );
+
+        // make a combobox
+        DW::Box *combox = new DW::Box(DW_VERT, 2);
+        notebookbox->PackStart(combox, 25, 200, TRUE, FALSE, 0);
+        DW::ComboBox *combobox1 = new DW::ComboBox("fred"); 
+        combobox1->Append("fred");
+        combox->PackStart(combobox1, TRUE, FALSE, 0);
+
+        int iteration = 0;
+        combobox1->ConnectListSelect([this, &iteration](unsigned int index) -> int
+        {
+            this->app->Debug("got combobox_select_event for index: %d, iteration: %d\n", index, iteration++);
+            return FALSE;
+        });
+
+        DW::ComboBox *combobox2 = new DW::ComboBox("joe");
+        combox->PackStart(combobox2, TRUE, FALSE, 0);
+        combobox2->ConnectListSelect([this, &iteration](unsigned int index) -> int
+        {
+            this->app->Debug("got combobox_select_event for index: %d, iteration: %d\n", index, iteration++);
+            return FALSE;
+        });
+
+        // add LOTS of items
+        app->Debug("before appending 500 items to combobox using DW::ListBox::ListAppend()\n");
+        std::vector<std::string> text;
+        for(int i = 0; i < 500; i++)
+        {
+            text.push_back("item " + std::to_string(i));
+        }
+        combobox2->ListAppend(text);
+        app->Debug("after appending 500 items to combobox\n");
+        // now insert a couple of items
+        combobox2->Insert("inserted item 2", 2);
+        combobox2->Insert("inserted item 5", 5);
+        // make a spinbutton
+        DW::SpinButton *spinbutton = new DW::SpinButton();
+        combox->PackStart(spinbutton, TRUE, FALSE, 0);
+        spinbutton->SetLimits(100, 1);
+        spinbutton->SetPos(30);
+        
+        spinbutton->ConnectValueChanged([this](int value) -> int
+        {
+            this->app->MessageBox("DWTest", DW_MB_OK, "New value from spinbutton: %d\n", value);
+            return TRUE;
+        });
+        // make a slider
+        DW::Slider *slider = new DW::Slider(FALSE, 11, 0); 
+        combox->PackStart(slider, TRUE, FALSE, 0);
+
+        // make a percent
+        DW::Percent *percent = new DW::Percent();
+        combox->PackStart(percent, TRUE, FALSE, 0);
+
+        topbutton->ConnectClicked([this, combobox1, combobox2, spinbutton, cal]() -> int 
+        {
+            unsigned int idx = combobox1->Selected();
+            std::string buf1 = combobox1->GetListText(idx);
+            idx = combobox2->Selected();
+            std::string buf2 = combobox2->GetListText(idx);
+            unsigned int y,m,d;
+            cal->GetDate(&y, &m, &d);
+            long spvalue = spinbutton->GetPos();
+            std::string buf3 = "spinbutton: " + std::to_string(spvalue) + "\ncombobox1: \"" + buf1 + 
+                                "\"\ncombobox2: \"" + buf2 + "\"\ncalendar: " + std::to_string(y) + "-" +
+                                std::to_string(m) + "-" + std::to_string(d);
+            this->app->MessageBox("Values", DW_MB_OK | DW_MB_INFORMATION, buf3);
+            this->app->SetClipboard(buf3);
+            return 0;
+        });
+
+        perbutton->ConnectClicked([percent]() -> int 
+        {
+            percent->SetPos(DW_PERCENT_INDETERMINATE);
+            return TRUE;
+        });
+
+        slider->ConnectValueChanged([percent](int value) -> int
+        {
+            percent->SetPos(value * 10);
+            return TRUE;
+        });
+    }
+
+    // Page 6 - HTML
+    void CreateHTML(DW::Box *notebookbox) {
+        DW::HTML *rawhtml = new DW::HTML();
+        if(rawhtml && rawhtml->GetHWND())
+        {
+            DW::Box *hbox = new DW::Box(DW_HORZ, 0);
+            DW::ComboBox *javascript = new DW::ComboBox();
+
+            javascript->Append("window.scrollTo(0,500);");
+            javascript->Append("window.document.title;");
+            javascript->Append("window.navigator.userAgent;");
+
+            notebookbox->PackStart(rawhtml, 0, 100, TRUE, FALSE, 0);
+            rawhtml->JavascriptAdd("test");
+            rawhtml->ConnectMessage([this](std::string name, std::string message) -> int
+            {
+                this->app->MessageBox("Javascript Message", DW_MB_OK | DW_MB_INFORMATION,
+                              "Name: " + name + " Message: " + message);
+                return TRUE;
+            });
+            rawhtml->Raw(dw_feature_get(DW_FEATURE_HTML_MESSAGE) == DW_FEATURE_ENABLED ?
+                         "<html><body><center><h1><a href=\"javascript:test('This is the message');\">dwtest</a></h1></center></body></html>" :
+                         "<html><body><center><h1>dwtest</h1></center></body></html>");
+            DW::HTML *html = new DW::HTML();
+
+            notebookbox->PackStart(hbox, 0, 0, TRUE, FALSE, 0);
+
+            // Add navigation buttons
+            DW::Button *button = new DW::Button("Back");
+            hbox->PackStart(button, FALSE, FALSE, 0);
+            button->ConnectClicked([html]() -> int 
+            {
+                html->Action(DW_HTML_GOBACK);
+                return TRUE;
+            });
+
+            button = new DW::Button("Forward");
+            hbox->PackStart(button, FALSE, FALSE, 0);
+            button->ConnectClicked([html]() -> int 
+            {
+                html->Action(DW_HTML_GOFORWARD);
+                return TRUE;
+            });
+
+            // Put in some extra space
+            hbox->PackStart(0, 5, 1, FALSE, FALSE, 0);
+
+            button = new DW::Button("Reload");
+            hbox->PackStart(button, FALSE, FALSE, 0);
+            button->ConnectClicked([html]() -> int 
+            {
+                html->Action(DW_HTML_RELOAD);
+                return TRUE;
+            });
+
+            // Put in some extra space
+            hbox->PackStart(0, 5, 1, FALSE, FALSE, 0);
+            hbox->PackStart(javascript, TRUE, FALSE, 0);
+
+            button = new DW::Button("Run");
+            hbox->PackStart(button, FALSE, FALSE, 0);
+            button->ConnectClicked([javascript, html]() -> int
+            {
+                std::string script = javascript->GetText();
+
+                if(script.size()) {
+                    html->JavascriptRun(script);
+                }
+                return FALSE;
+            });
+            javascript->ClickDefault(button);
+
+            notebookbox->PackStart(html, 0, 100, TRUE, TRUE, 0);
+            html->URL("https://dbsoft.org/dw_help.php");
+            DW::StatusText *htmlstatus = new DW::StatusText("HTML status loading...");
+            notebookbox->PackStart(htmlstatus, 100, DW_SIZE_AUTO, TRUE, FALSE, 1);
+
+            // Connect the signal handlers
+            html->ConnectChanged([htmlstatus](int status, std::string url) -> int
+            {
+                std::vector<std::string> statusnames = { "none", "started", "redirect", "loading", "complete" };
+
+                if(htmlstatus && status < 5) {
+                    htmlstatus->SetText("Status " + statusnames[status] + ": " + url);
+                }
+                return FALSE;
+            });
+
+            html->ConnectResult([this](int status, std::string result, void *script_data) -> int
+            {
+                this->app->MessageBox("Javascript Result", DW_MB_OK | (status ? DW_MB_ERROR : DW_MB_INFORMATION),
+                              result.size() ? result : "Javascript result is not a string value");
+                return TRUE;
+            });
+        }
+        else
+        {
+            DW::Text *htmltext = new DW::Text("HTML widget not available.");
+            notebookbox->PackStart(htmltext, 0, 100, TRUE, TRUE, 0);
+        }
+    }
+
+    // Page 7 - ScrollBox
+    void CreateScrollBox(DW::Box *notebookbox) {
+        // create a box to pack into the notebook page
+        DW::ScrollBox *scrollbox = new DW::ScrollBox(DW_VERT, 0);
+        notebookbox->PackStart(scrollbox, 0, 0, TRUE, TRUE, 1);
+
+        DW::Button *adjbutton = new DW::Button("Show Adjustments", 0);
+        scrollbox->PackStart(adjbutton, FALSE, FALSE, 0);
+        adjbutton->ConnectClicked([this, scrollbox]() -> int 
+        {
+            int pos = scrollbox->GetPos(DW_VERT);
+            int range = scrollbox->GetRange(DW_VERT);
+            this->app->Debug("Pos %d Range %d\n", pos, range);
+            return FALSE;
+        });
+
+        for(int i = 0; i < MAX_WIDGETS; i++)
+        {
+            DW::Box *tmpbox = new DW::Box(DW_HORZ, 0);
+            scrollbox->PackStart(tmpbox, 0, 0, TRUE, FALSE, 2);
+            DW::Text *label = new DW::Text("Label " + std::to_string(i));
+            tmpbox->PackStart(label, 0, DW_SIZE_AUTO, TRUE, FALSE, 0);
+            DW::Entryfield *entry = new DW::Entryfield("Entry " + std::to_string(i) , i);
+            tmpbox->PackStart(entry, 0, DW_SIZE_AUTO, TRUE, FALSE, 0);
+        }
+    }
+
+    // Page 8 - Thread and Event
+    void CreateThreadEvent(DW::Box *notebookbox) {
+        // create a box to pack into the notebook page
+        DW::Box *tmpbox = new DW::Box(DW_VERT, 0);
+        notebookbox->PackStart(tmpbox, 0, 0, TRUE, TRUE, 1);
+
+        DW::Button *startbutton = new DW::Button("Start Threads");
+        tmpbox->PackStart(startbutton, FALSE, FALSE, 0);
+
+        // Create the base threading components
+        DW::MLE *threadmle = new DW::MLE();
+        tmpbox->PackStart(threadmle, 1, 1, TRUE, TRUE, 0);
+        DW::Mutex *mutex = new DW::Mutex();
+        DW::Event *workevent = new DW::Event();
+
+        startbutton->ConnectClicked([this, mutex, workevent, threadmle, startbutton]() -> int
+        {
+            startbutton->Disable();
+            mutex->Lock();
+            DW::Event *controlevent = new DW::Event();
+            workevent->Reset();
+            finished = FALSE;
+            ready = 0;
+            UpdateMLE(threadmle, "Starting thread 1\r\n", DW_NULL);
+            new DW::Thread([this, mutex, controlevent, workevent, threadmle](DW::Thread *thread) -> void {
+                this->RunThread(1, mutex, controlevent, workevent, threadmle);
+            });
+            UpdateMLE(threadmle, "Starting thread 2\r\n", DW_NULL);
+            new DW::Thread([this, mutex, controlevent, workevent, threadmle](DW::Thread *thread) -> void {
+                this->RunThread(2, mutex, controlevent, workevent, threadmle);
+            });
+            UpdateMLE(threadmle, "Starting thread 3\r\n", DW_NULL);
+            new DW::Thread([this, mutex, controlevent, workevent, threadmle](DW::Thread *thread) -> void {
+                this->RunThread(3, mutex, controlevent, workevent, threadmle);
+            });
+            UpdateMLE(threadmle, "Starting thread 4\r\n", DW_NULL);
+            new DW::Thread([this, mutex, controlevent, workevent, threadmle](DW::Thread *thread) -> void {
+                this->RunThread(4, mutex, controlevent, workevent, threadmle);
+            });
+            UpdateMLE(threadmle, "Starting control thread\r\n", DW_NULL);
+            new DW::Thread([this, startbutton, mutex, controlevent, workevent, threadmle](DW::Thread *thread) -> void {
+                this->ControlThread(mutex, controlevent, workevent, threadmle);
+                startbutton->Enable();
+            });
+            mutex->Unlock();
+            return FALSE;
+        });
+    }
 public:
     // Constructor creates the application
-    DWTest(const char *title): DW::Window(title) {
-        char fileiconpath[1025] = "file";
-        char foldericonpath[1025] = "folder";
-
+    DWTest(std::string title): DW::Window(title) {
         // Get our application singleton
         app = DW::App::Init();
 
@@ -893,39 +1798,34 @@ public:
         fileicon = app->LoadIcon(fileiconpath);
 
 #ifdef PLATFORMFOLDER
-        /* In case we are running from the build directory...
-         * also check the appropriate platform subfolder
-         */
+        // In case we are running from the build directory...
+        // also check the appropriate platform subfolder
         if(!foldericon)
         {
-            strncpy(foldericonpath, PLATFORMFOLDER "folder", 1024);
+            foldericonpath = std::string(PLATFORMFOLDER) + "folder";
             foldericon = app->LoadIcon(foldericonpath);
         }
         if(!fileicon)
         {
-            strncpy(fileiconpath, PLATFORMFOLDER "file", 1024);
+            fileiconpath = std::string(PLATFORMFOLDER) + "file";
             fileicon = app->LoadIcon(fileiconpath);
         }
 #endif
 
-        /* Finally try from the platform application directory */
+        // Finally try from the platform application directory
         if(!foldericon && !fileicon)
         {
-            char *appdir = app->GetDir();
-            char pathbuff[1025] = {0};
-            int pos = (int)strlen(appdir);
-
-            strncpy(pathbuff, appdir, 1024);
-            pathbuff[pos] = DW_DIR_SEPARATOR;
-            pos++;
-            strncpy(&pathbuff[pos], "folder", 1024-pos);
-            foldericon = app->LoadIcon(pathbuff);
+            std::string appdir = app->GetDir();
+            
+            appdir.append(std::string(1, DW_DIR_SEPARATOR));
+            std::string folderpath = appdir + "folder";
+            foldericon = app->LoadIcon(folderpath);
             if(foldericon)
-                strncpy(foldericonpath, pathbuff, 1025);
-            strncpy(&pathbuff[pos], "file", 1024-pos);
-            fileicon = app->LoadIcon(pathbuff);
+                foldericonpath = folderpath;
+            std::string filepath = appdir + "file";
+            fileicon = app->LoadIcon(filepath);
             if(fileicon)
-                strncpy(fileiconpath, pathbuff, 1025);
+                fileiconpath = filepath;
         }
 
         DW::Notebook *notebook = new DW::Notebook();
@@ -949,6 +1849,48 @@ public:
         notebookpage = notebook->PageNew();
         notebook->Pack(notebookpage, notebookbox);
         notebook->PageSetText(notebookpage, "render");
+
+        // Create Notebook Page 3 - Tree
+        notebookbox = new DW::Box(DW_VERT, 5);
+        CreateTree(notebookbox);
+        notebookpage = notebook->PageNew();
+        notebook->Pack(notebookpage, notebookbox);
+        notebook->PageSetText(notebookpage, "tree");
+
+        // Create Notebook Page 4 - Container
+        notebookbox = new DW::Box(DW_VERT, 5);
+        CreateContainer(notebookbox);
+        notebookpage = notebook->PageNew();
+        notebook->Pack(notebookpage, notebookbox);
+        notebook->PageSetText(notebookpage, "container");
+
+        // Create Notebook Page 5 - Buttons
+        notebookbox = new DW::Box(DW_VERT, 5);
+        CreateButtons(notebookbox);
+        notebookpage = notebook->PageNew();
+        notebook->Pack(notebookpage, notebookbox);
+        notebook->PageSetText(notebookpage, "buttons");
+
+        // Create Notebook Page 6 - HTML
+        notebookbox = new DW::Box(DW_VERT, 5);
+        CreateHTML(notebookbox);
+        notebookpage = notebook->PageNew();
+        notebook->Pack(notebookpage, notebookbox);
+        notebook->PageSetText(notebookpage, "html");
+
+        // Create Notebook Page 7 - ScrollBox
+        notebookbox = new DW::Box(DW_VERT, 5);
+        CreateScrollBox(notebookbox);
+        notebookpage = notebook->PageNew();
+        notebook->Pack(notebookpage, notebookbox);
+        notebook->PageSetText(notebookpage, "scrollbox");
+
+        // Create Notebook Page 8 - Thread and Event
+        notebookbox = new DW::Box(DW_VERT, 5);
+        CreateThreadEvent(notebookbox);
+        notebookpage = notebook->PageNew();
+        notebook->Pack(notebookpage, notebookbox);
+        notebook->PageSetText(notebookpage, "thread/event");
 
         // Finalize the window
         this->SetSize(640, 550);
@@ -980,17 +1922,23 @@ public:
     int rows=10,width1=6,cols=80;
     int num_lines=0, max_linewidth=0;
     int current_row=0,current_col=0;
-    int render_type = SHAPES_DOUBLE_BUFFERED;
+    unsigned int render_type = SHAPES_DOUBLE_BUFFERED;
 
     char **lp;
-    char *current_file = NULL;
+    std::string current_file;
 
     // Page 4
     int mle_point=-1;
 
+    // Page 8
+    int finished = FALSE, ready = 0;
+
     // Miscellaneous
     int menu_enabled = TRUE;
-    HICN fileicon,foldericon;
+    HICN fileicon, foldericon;
+    std::string fileiconpath = "file";
+    std::string foldericonpath = "folder";
+
 
     int OnDelete() override {
         if(app->MessageBox(APP_TITLE, DW_MB_YESNO | DW_MB_QUESTION, APP_EXIT) != 0) {
@@ -1000,8 +1948,8 @@ public:
     }
 };
 
-/* Pretty list of features corresponding to the DWFEATURE enum in dw.h */
-const char *DWFeatureList[] = {
+// Pretty list of features corresponding to the DWFEATURE enum in dw.h
+std::vector<std::string> DWFeatureList = {
     "Supports the HTML Widget",
     "Supports the DW_SIGNAL_HTML_RESULT callback",
     "Supports custom window border sizes",
@@ -1019,38 +1967,38 @@ const char *DWFeatureList[] = {
     "Supports the Tree Widget",
     "Supports arbitrary window placement",
     "Supports alternate container view modes",
-    NULL };
+    "Supports the DW_SIGNAL_HTML_MESSAGE callback",
+    "Supports render safe drawing mode, limited to expose"
+};
 
-/*
- * Let's demonstrate the functionality of this library. :)
- */
+// Let's demonstrate the functionality of this library. :)
 int dwmain(int argc, char* argv[]) 
 {
-    /* Initialize the Dynamic Windows engine */
+    // Initialize the Dynamic Windows engine
     DW::App *app = DW::App::Init(argc, argv, "org.dbsoft.dwindows.dwtestoo", "Dynamic Windows Test C++");
 
-    /* Enable full dark mode on platforms that support it */
+    // Enable full dark mode on platforms that support it
     if(getenv("DW_DARK_MODE"))
         app->SetFeature(DW_FEATURE_DARK_MODE, DW_DARK_MODE_FULL);
 
 #ifdef DW_MOBILE
-    /* Enable multi-line container display on Mobile platforms */
+    // Enable multi-line container display on Mobile platforms
     app->SetFeature(DW_FEATURE_CONTAINER_MODE, DW_CONTAINER_MODE_MULTI);
 #endif
 
-    /* Test all the features and display the results */
+    // Test all the features and display the results
     for(int intfeat=DW_FEATURE_HTML; intfeat<DW_FEATURE_MAX; intfeat++)
     {
         DWFEATURE feat = static_cast<DWFEATURE>(intfeat);
-        int result = dw_feature_get(feat);
-        const char *status = "Unsupported";
+        int result = app->GetFeature(feat);
+        std::string status = "Unsupported";
 
         if(result == 0)
             status = "Disabled";
         else if(result > 0)
             status = "Enabled";
 
-        app->Debug("%s: %s (%d)\n", DWFeatureList[feat], status, result);
+        app->Debug(DWFeatureList[intfeat] + ": " + status + " (" + std::to_string(result) + ")\n");
     }
 
     DWTest *window = new DWTest("dwindows test UTF8 中国語 (繁体) cañón");
@@ -1061,3 +2009,4 @@ int dwmain(int argc, char* argv[])
 
     return 0;
 }
+#endif

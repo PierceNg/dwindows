@@ -3,7 +3,7 @@
  *          A GTK like cross-platform GUI
  *          GTK4 forwarder module for portabilty.
  *
- * (C) 2000-2022 Brian Smith <brian@dbsoft.org>
+ * (C) 2000-2023 Brian Smith <brian@dbsoft.org>
  * (C) 2003-2022 Mark Hessling <mark@rexx.org>
  */
 #include "dwconfig.h"
@@ -34,7 +34,11 @@
 #endif
 
 #ifdef USE_WEBKIT
+#ifdef USE_WEBKIT6
+#include <webkit/webkit.h>
+#else
 #include <webkit2/webkit2.h>
+#endif
 #endif
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
@@ -477,6 +481,11 @@ static gint _dw_column_click_event(GtkWidget *widget, gpointer data);
 #ifdef USE_WEBKIT
 static void _dw_html_result_event(GObject *object, GAsyncResult *result, gpointer script_data);
 static void _dw_html_changed_event(WebKitWebView  *web_view, WebKitLoadEvent load_event, gpointer data);
+#ifdef USE_WEBKIT6
+static void _dw_html_message_event(WebKitUserContentManager *manager, JSCValue *result, gpointer *data);
+#else
+static void _dw_html_message_event(WebKitUserContentManager *manager, WebKitJavascriptResult *result, gpointer *data);
+#endif
 #endif
 static void _dw_signal_disconnect(gpointer data, GClosure *closure);
 static void _dw_event_coordinates_to_window(GtkWidget *widget, double *x, double *y);
@@ -522,7 +531,7 @@ typedef struct
 
 } DWSignalHandler;
 
-/* A list of signal forwarders, to account for paramater differences. */
+/* A list of signal forwarders, to account for parameter differences. */
 static DWSignalList DWSignalTranslate[] = {
    { _dw_configure_event,         DW_SIGNAL_CONFIGURE,      "resize",            NULL },
    { _dw_key_press_event,         DW_SIGNAL_KEY_PRESS,      "key-pressed",       _dw_key_setup },
@@ -544,6 +553,7 @@ static DWSignalList DWSignalTranslate[] = {
 #ifdef USE_WEBKIT
    { _dw_html_changed_event,      DW_SIGNAL_HTML_CHANGED,    "load-changed",     NULL },
    { _dw_html_result_event,       DW_SIGNAL_HTML_RESULT,     "",                 _dw_html_setup },
+   { _dw_html_message_event,      DW_SIGNAL_HTML_MESSAGE,    "",                 _dw_html_setup },
 #endif
    { NULL,                        "",                        "",                 NULL }
 };
@@ -674,7 +684,9 @@ static void _dw_set_signal_handler_id(GObject *object, int counter, gint cid)
 static void _dw_html_result_event(GObject *object, GAsyncResult *result, gpointer script_data)
 {
     pthread_t saved_thread = _dw_thread;
+#ifndef USE_WEBKIT6
     WebKitJavascriptResult *js_result;
+#endif
     JSCValue *value;
     GError *error = NULL;
     int (*htmlresultfunc)(HWND, int, char *, void *, void *) = NULL;
@@ -684,10 +696,8 @@ static void _dw_html_result_event(GObject *object, GAsyncResult *result, gpointe
     _dw_thread = (pthread_t)-1;
     if(handlerdata)
     {
-        DWSignalHandler work;
         void *params[3] = { GINT_TO_POINTER(handlerdata-1), 0, object };
-
-        work = _dw_get_signal_handler(params);
+        DWSignalHandler work = _dw_get_signal_handler(params);
 
         if(work.window)
         {
@@ -696,7 +706,11 @@ static void _dw_html_result_event(GObject *object, GAsyncResult *result, gpointe
         }
     }
 
+#ifdef USE_WEBKIT6
+    if(!(value = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(object), result, &error)))
+#else
     if(!(js_result = webkit_web_view_run_javascript_finish(WEBKIT_WEB_VIEW(object), result, &error)))
+#endif
     {
         if(htmlresultfunc)
            htmlresultfunc((HWND)object, DW_ERROR_UNKNOWN, error->message, script_data, user_data);
@@ -705,7 +719,9 @@ static void _dw_html_result_event(GObject *object, GAsyncResult *result, gpointe
         return;
     }
 
+#ifndef USE_WEBKIT6
     value = webkit_javascript_result_get_js_value(js_result);
+#endif
     if(jsc_value_is_string(value))
     {
         gchar *str_value = jsc_value_to_string(value);
@@ -722,8 +738,51 @@ static void _dw_html_result_event(GObject *object, GAsyncResult *result, gpointe
     }
     else if(htmlresultfunc)
         htmlresultfunc((HWND)object, DW_ERROR_UNKNOWN, NULL, script_data, user_data);
+#ifndef USE_WEBKIT6
     webkit_javascript_result_unref (js_result);
+#endif
    _dw_thread = saved_thread;
+}
+
+#ifdef USE_WEBKIT6
+static void _dw_html_message_event(WebKitUserContentManager *manager, JSCValue *result, gpointer *data)
+#else
+static void _dw_html_message_event(WebKitUserContentManager *manager, WebKitJavascriptResult *result, gpointer *data)
+#endif
+{
+    HWND window = (HWND)data[0];
+    int (*htmlmessagefunc)(HWND, char *, char *, void *) = NULL;
+    void *user_data = NULL;
+    gchar *name = (gchar *)data[1];
+    gint handlerdata;
+
+    if(window && (handlerdata = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(window), "_dw_html_message_id"))))
+    {
+        void *params[3] = { GINT_TO_POINTER(handlerdata-1), 0, window };
+        DWSignalHandler work = _dw_get_signal_handler(params);
+
+        if(work.window)
+        {
+            htmlmessagefunc = work.func;
+            user_data = work.data;
+        }
+    }
+
+    if(jsc_value_is_string(result))
+    {
+        gchar *str_value = jsc_value_to_string(result);
+        JSCException *exception = jsc_context_get_exception(jsc_value_get_context(result));
+
+        if(htmlmessagefunc && !exception)
+            htmlmessagefunc(window, name, str_value, user_data);
+            
+        g_free(str_value);
+        
+        if(!exception)
+          return;
+    }
+    if(htmlmessagefunc)
+        htmlmessagefunc(window, name, NULL, user_data);
 }
 
 static void _dw_html_changed_event(WebKitWebView  *web_view, WebKitLoadEvent load_event, gpointer data)
@@ -1791,17 +1850,68 @@ void API dw_vdebug(const char *format, va_list args)
    vfprintf(stderr, format, args);
 }
 
+#if GTK_CHECK_VERSION(4,10,0)
+static void _dw_alert_dialog_choose_response(GObject *gobject, GAsyncResult *result, gpointer data)
+{
+  DWDialog *tmp = data;
+  GError *error = NULL;
+  int retval = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(gobject), result, &error);
+
+  if(error != NULL)
+  {
+      retval = -1;
+  }
+  dw_dialog_dismiss(tmp, DW_INT_TO_POINTER(retval));
+}
+
+static char *_DW_BUTTON_OK = "Ok";
+static char *_DW_BUTTON_YES = "Yes";
+static char *_DW_BUTTON_NO = "No";
+static char *_DW_BUTTON_CANCEL = "Cancel";
+#endif
+
 /* Internal version that does not use variable arguments */
 DW_FUNCTION_DEFINITION(dw_messagebox_int, int, const char *title, int flags, char *outbuf)
 DW_FUNCTION_ADD_PARAM3(title, flags, outbuf)
 DW_FUNCTION_RETURN(dw_messagebox_int, int)
 DW_FUNCTION_RESTORE_PARAM3(title, const char *, flags, int, outbuf, char *)
 {
+   int response, retval = DW_MB_RETURN_OK;
+   DWDialog *tmp = dw_dialog_new(NULL);
+#if GTK_CHECK_VERSION(4,10,0)
+   GtkAlertDialog *ad = gtk_alert_dialog_new("%s", title);
+   char *buttons[4] = { 0 };
+   int button = 0;
+
+   gtk_alert_dialog_set_message(ad, outbuf);
+   gtk_alert_dialog_set_modal(ad, TRUE);
+
+   if(flags & (DW_MB_OK | DW_MB_OKCANCEL))
+      buttons[button++] = _DW_BUTTON_OK;
+   if(flags & (DW_MB_YESNO | DW_MB_YESNOCANCEL))
+      buttons[button++] = _DW_BUTTON_YES;
+   if(flags & (DW_MB_YESNO | DW_MB_YESNOCANCEL))
+      buttons[button++] = _DW_BUTTON_NO;
+   if(flags & (DW_MB_OKCANCEL | DW_MB_YESNOCANCEL))
+      buttons[button++] = _DW_BUTTON_CANCEL;
+   gtk_alert_dialog_set_buttons(ad, (const char * const*)buttons);
+
+   gtk_alert_dialog_choose(ad, NULL, NULL, (GAsyncReadyCallback)_dw_alert_dialog_choose_response, tmp);
+
+   response = DW_POINTER_TO_INT(dw_dialog_wait(tmp));
+
+   if(response < 0 || response >= button || buttons[response] == _DW_BUTTON_OK)
+      retval = DW_MB_RETURN_OK;
+   else if(buttons[response] == _DW_BUTTON_CANCEL)
+      retval = DW_MB_RETURN_CANCEL;
+   else if(buttons[response] == _DW_BUTTON_YES)
+      retval = DW_MB_RETURN_YES;
+   else if(buttons[response] == _DW_BUTTON_NO)
+      retval = DW_MB_RETURN_NO;
+#else
    GtkMessageType gtkicon = GTK_MESSAGE_OTHER;
    GtkButtonsType gtkbuttons = GTK_BUTTONS_OK;
    GtkWidget *dialog;
-   int response, retval = DW_MB_RETURN_OK;
-   DWDialog *tmp = dw_dialog_new(NULL);
    ULONG width, height;
 
    if(flags & DW_MB_ERROR)
@@ -1824,7 +1934,7 @@ DW_FUNCTION_RESTORE_PARAM3(title, const char *, flags, int, outbuf, char *)
    gtk_message_dialog_format_secondary_text(GTK_MESSAGE_DIALOG(dialog), "%s", outbuf);
    if(flags & DW_MB_YESNOCANCEL)
       gtk_dialog_add_button(GTK_DIALOG(dialog), "Cancel", GTK_RESPONSE_CANCEL);
-   gtk_widget_show(GTK_WIDGET(dialog));
+   gtk_widget_set_visible(GTK_WIDGET(dialog), TRUE);
    g_signal_connect(G_OBJECT(dialog), "response", G_CALLBACK(_dw_dialog_response), (gpointer)tmp);
    /* Center the dialog on the screen since there is no parent */
    dw_window_get_pos_size((HWND)dialog, NULL, NULL, &width, &height);
@@ -1855,6 +1965,7 @@ DW_FUNCTION_RESTORE_PARAM3(title, const char *, flags, int, outbuf, char *)
             retval = DW_MB_RETURN_NO;
       }
    }
+#endif
    DW_FUNCTION_RETURN_THIS(retval);
 }
 
@@ -1992,7 +2103,7 @@ DW_FUNCTION_RESTORE_PARAM1(handle, HWND)
             gtk_widget_grab_focus(defaultitem);
       }
       else if(GTK_IS_WIDGET(handle))
-         gtk_widget_show(handle);
+         gtk_widget_set_visible(handle, TRUE);
    }
    DW_FUNCTION_RETURN_THIS(retval);
 }
@@ -2010,7 +2121,7 @@ DW_FUNCTION_RESTORE_PARAM1(handle, HWND)
    int retval = DW_ERROR_NONE;
 
    if(handle && GTK_IS_WIDGET(handle))
-      gtk_widget_hide(handle);
+      gtk_widget_set_visible(handle, FALSE);
    DW_FUNCTION_RETURN_THIS(retval);
 }
 
@@ -2274,6 +2385,62 @@ DW_FUNCTION_RESTORE_PARAM2(handle, HWND, fontname, const char *)
    DW_FUNCTION_RETURN_THIS(retval);
 }
 
+/* Internal function to convert from a pango font description to Dynamic Windows style font string */
+char *_dw_font_from_pango_font_description(PangoFontDescription *pfont)
+{
+  char *retfont = NULL;
+
+  if(pfont)
+  {
+     char *font = pango_font_description_to_string(pfont);
+     int len, x;
+
+     retfont = strdup(font);
+     len = strlen(font);
+  
+     /* Convert to Dynamic Windows format if we can... */
+     if(len > 0 && isdigit(font[len-1]))
+     {
+        int size;
+
+        x=len-1;
+        while(x > 0 && font[x] != ' ')
+        {
+           x--;
+        }
+        size = atoi(&font[x]);
+        /* If we were able to find a valid size... */
+        if(size > 0)
+        {
+           /* Null terminate after the name...
+            * and create the Dynamic Windows style font.
+            */
+           font[x] = 0;
+           snprintf(retfont, len+1, "%d.%s", size, font);
+        }
+     }
+     g_free(font);
+  }
+  return retfont;
+}
+
+#if GTK_CHECK_VERSION(4,10,0)
+static void _dw_font_choose_response(GObject *gobject, GAsyncResult *result, gpointer data)
+{
+  DWDialog *tmp = data;
+  GError *error = NULL;
+  char *fontname = NULL;
+  PangoFontDescription *pfd = gtk_font_dialog_choose_font_finish(GTK_FONT_DIALOG(gobject), result, &error);
+
+  if(error == NULL && pfd != NULL)
+  {
+    fontname = _dw_font_from_pango_font_description(pfd);
+    pango_font_description_free(pfd);
+  }
+  dw_dialog_dismiss(tmp, fontname);
+}
+#endif
+
 /* Allows the user to choose a font using the system's font chooser dialog.
  * Parameters:
  *       currfont: current font
@@ -2285,11 +2452,20 @@ DW_FUNCTION_ADD_PARAM1(currfont)
 DW_FUNCTION_RETURN(dw_font_choose, char *)
 DW_FUNCTION_RESTORE_PARAM1(currfont, const char *)
 {
-   GtkFontChooser *fd;
-   char *font = currfont ? strdup(currfont) : NULL;
-   char *name = font ? strchr(font, '.') : NULL;
    char *retfont = NULL;
    DWDialog *tmp = dw_dialog_new(NULL);
+#if GTK_CHECK_VERSION(4,10,0)
+   char *font = _dw_convert_font(currfont);
+   PangoFontDescription *pfd = font ? pango_font_description_from_string(font) : NULL;
+   GtkFontDialog *fd = gtk_font_dialog_new();
+
+   gtk_font_dialog_choose_font(fd, NULL, pfd, NULL, (GAsyncReadyCallback)_dw_font_choose_response, tmp);
+   
+   retfont = dw_dialog_wait(tmp);
+#else
+   char *font = currfont ? strdup(currfont) : NULL;
+   char *name = font ? strchr(font, '.') : NULL;
+   GtkFontChooser *fd;
 
    /* Detect Dynamic Windows style font name...
     * Format: ##.Fontname
@@ -2310,7 +2486,7 @@ DW_FUNCTION_RESTORE_PARAM1(currfont, const char *)
       free(font);
    }
 
-   gtk_widget_show(GTK_WIDGET(fd));
+   gtk_widget_set_visible(GTK_WIDGET(fd), TRUE);
    g_signal_connect(G_OBJECT(fd), "response", G_CALLBACK(_dw_dialog_response), (gpointer)tmp);
 
    if(DW_POINTER_TO_INT(dw_dialog_wait(tmp)) == GTK_RESPONSE_OK)
@@ -2344,6 +2520,7 @@ DW_FUNCTION_RESTORE_PARAM1(currfont, const char *)
    }
    if(GTK_IS_WINDOW(fd))
       gtk_window_destroy(GTK_WINDOW(fd));
+#endif
    DW_FUNCTION_RETURN_THIS(retfont);
 }
 
@@ -2381,36 +2558,7 @@ DW_FUNCTION_RESTORE_PARAM1(handle, HWND)
    if(pcontext)
    {
       pfont = pango_context_get_font_description(pcontext);
-      if(pfont)
-      {
-         int len, x;
-
-         font = pango_font_description_to_string(pfont);
-         retfont = strdup(font);
-         len = strlen(font);
-         /* Convert to Dynamic Windows format if we can... */
-         if(len > 0 && isdigit(font[len-1]))
-         {
-            int size;
-
-            x=len-1;
-            while(x > 0 && font[x] != ' ')
-            {
-               x--;
-            }
-            size = atoi(&font[x]);
-            /* If we were able to find a valid size... */
-            if(size > 0)
-            {
-               /* Null terminate after the name...
-                * and create the Dynamic Windows style font.
-                */
-               font[x] = 0;
-               snprintf(retfont, len+1, "%d.%s", size, font);
-            }
-         }
-         g_free(font);
-      }
+      retfont = _dw_font_from_pango_font_description(pfont);
    }
    DW_FUNCTION_RETURN_THIS(retfont);
 }
@@ -2623,7 +2771,7 @@ DW_FUNCTION_RESTORE_PARAM3(DW_UNUSED(hwndOwner), HWND, title, char *, flStyle, U
    GtkWidget *grid = gtk_grid_new();
    GtkWidget *tmp = gtk_window_new();
 
-   gtk_widget_show(grid);
+   gtk_widget_set_visible(grid, TRUE);
 
    /* Handle the window style flags */
    gtk_window_set_title(GTK_WINDOW(tmp), title);
@@ -2667,7 +2815,7 @@ DW_FUNCTION_RESTORE_PARAM2(type, int, pad, int)
    GtkWidget *tmp = gtk_grid_new();
    g_object_set_data(G_OBJECT(tmp), "_dw_boxtype", GINT_TO_POINTER(type));
    _dw_widget_set_pad(tmp, pad);
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    DW_FUNCTION_RETURN_THIS(tmp);
 }
 
@@ -2695,8 +2843,8 @@ DW_FUNCTION_RESTORE_PARAM2(type, int, pad, int)
    
    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(tmp), box);
    g_object_set_data(G_OBJECT(tmp), "_dw_user", box);
-   gtk_widget_show(box);
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(box, TRUE);
+   gtk_widget_set_visible(tmp, TRUE);
 
    DW_FUNCTION_RETURN_THIS(tmp);
 }
@@ -2773,8 +2921,8 @@ DW_FUNCTION_RESTORE_PARAM3(type, int, pad, int, title, const char *)
    g_object_set_data(G_OBJECT(frame), "_dw_boxhandle", (gpointer)tmp);
    _dw_widget_set_pad(tmp, pad);
    gtk_frame_set_child(GTK_FRAME(frame), tmp);
-   gtk_widget_show(tmp);
-   gtk_widget_show(frame);
+   gtk_widget_set_visible(tmp, TRUE);
+   gtk_widget_set_visible(frame, TRUE);
    if(_DWDefaultFont)
       dw_window_set_font(frame, _DWDefaultFont);
    DW_FUNCTION_RETURN_THIS(frame);
@@ -2799,7 +2947,7 @@ DW_FUNCTION_RESTORE_PARAM1(cid, ULONG)
 #endif
    gtk_widget_set_halign(GTK_WIDGET(tmp), GTK_ALIGN_CENTER);
    gtk_widget_set_valign(GTK_WIDGET(tmp), GTK_ALIGN_CENTER);
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
    DW_FUNCTION_RETURN_THIS(tmp);
 }
@@ -2823,7 +2971,7 @@ DW_FUNCTION_RESTORE_PARAM2(cid, ULONG, top, int)
    else
       gtk_notebook_set_tab_pos(GTK_NOTEBOOK(tmp), GTK_POS_BOTTOM);
    gtk_notebook_set_scrollable(GTK_NOTEBOOK(tmp), TRUE);
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
    g_object_set_data(G_OBJECT(tmp), "_dw_pagearray", (gpointer)pagearray);
    DW_FUNCTION_RETURN_THIS(tmp);
@@ -2923,7 +3071,7 @@ DW_FUNCTION_RESTORE_PARAM1(location, HWND)
       tmp = gtk_popover_menu_bar_new_from_model(G_MENU_MODEL(menu));
       snprintf(tempbuf, 24, "menu%d", ++_dw_menugroup);
       gtk_widget_insert_action_group(GTK_WIDGET(tmp), tempbuf, G_ACTION_GROUP(group));
-      gtk_widget_show(tmp);
+      gtk_widget_set_visible(tmp, TRUE);
 
       /* Save pointers to each other */
       g_object_set_data(G_OBJECT(location), "_dw_menubar", (gpointer)tmp);
@@ -3412,7 +3560,7 @@ GtkWidget *_dw_tree_create(unsigned long id)
                GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
 
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(id));
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    return tmp;
 }
 
@@ -3484,7 +3632,7 @@ DW_FUNCTION_RESTORE_PARAM1(cid, ULONG)
 
       sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(tree));
       gtk_tree_selection_set_mode(sel, GTK_SELECTION_SINGLE);
-      gtk_widget_show(tree);
+      gtk_widget_set_visible(tree, TRUE);
 
       if(_DWDefaultFont)
          dw_window_set_font(tmp, _DWDefaultFont);
@@ -3509,7 +3657,7 @@ DW_FUNCTION_RESTORE_PARAM2(text, const char *, cid, ULONG)
    /* Left and centered */
    gtk_label_set_xalign(GTK_LABEL(tmp), 0.0f);
    gtk_label_set_yalign(GTK_LABEL(tmp), 0.5f);
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
    if(_DWDefaultFont)
       dw_window_set_font(tmp, _DWDefaultFont);
@@ -3530,8 +3678,8 @@ DW_FUNCTION_RESTORE_PARAM2(text, const char *, cid, ULONG)
    GtkWidget *tmp, *frame = gtk_frame_new(NULL);
    tmp = gtk_label_new(text);
    gtk_frame_set_child(GTK_FRAME(frame), tmp);
-   gtk_widget_show(tmp);
-   gtk_widget_show(frame);
+   gtk_widget_set_visible(tmp, TRUE);
+   gtk_widget_set_visible(frame, TRUE);
 
    /* Left and centered */
    gtk_label_set_xalign(GTK_LABEL(tmp), 0.0f);
@@ -3562,8 +3710,8 @@ DW_FUNCTION_RESTORE_PARAM1(cid, ULONG)
 
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
    g_object_set_data(G_OBJECT(tmpbox), "_dw_user", (gpointer)tmp);
-   gtk_widget_show(tmp);
-   gtk_widget_show(tmpbox);
+   gtk_widget_set_visible(tmp, TRUE);
+   gtk_widget_set_visible(tmpbox, TRUE);
    if(_DWDefaultFont)
       dw_window_set_font(tmpbox, _DWDefaultFont);
    DW_FUNCTION_RETURN_THIS(tmpbox);
@@ -3583,7 +3731,7 @@ DW_FUNCTION_RESTORE_PARAM2(text, const char *, cid, ULONG)
    GtkEntryBuffer *buffer = gtk_entry_buffer_new(text, -1);
    GtkWidget *tmp = gtk_entry_new_with_buffer(buffer);
 
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
 
     if(_DWDefaultFont)
@@ -3607,7 +3755,7 @@ DW_FUNCTION_RESTORE_PARAM2(text, const char *, cid, ULONG)
 
    gtk_entry_set_visibility(GTK_ENTRY(tmp), FALSE);
 
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
 
    if(_DWDefaultFont)
@@ -3634,7 +3782,7 @@ DW_FUNCTION_RESTORE_PARAM2(text, const char *, cid, ULONG)
    buffer = gtk_entry_get_buffer(GTK_ENTRY(gtk_combo_box_get_child(GTK_COMBO_BOX(tmp))));
    gtk_entry_buffer_set_max_length(buffer, 0);
    gtk_entry_buffer_set_text(buffer, text, -1);
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    g_object_set_data(G_OBJECT(tmp), "_dw_tree_type", GINT_TO_POINTER(_DW_TREE_TYPE_COMBOBOX));
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
    if(_DWDefaultFont)
@@ -3654,7 +3802,7 @@ DW_FUNCTION_RETURN(dw_button_new, HWND)
 DW_FUNCTION_RESTORE_PARAM2(text, const char *, cid, ULONG)
 {
    GtkWidget *tmp = gtk_button_new_with_label(text);
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
    if(_DWDefaultFont)
       dw_window_set_font(tmp, _DWDefaultFont);
@@ -3681,7 +3829,7 @@ DW_FUNCTION_RESTORE_PARAM2(text, const char *, cid, ULONG)
       gtk_button_set_child(GTK_BUTTON(tmp), bitmap);
       g_object_set_data(G_OBJECT(tmp), "_dw_bitmap", bitmap);
    }
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    if(text)
       gtk_widget_set_tooltip_text(tmp, text);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
@@ -3712,7 +3860,7 @@ DW_FUNCTION_RESTORE_PARAM3(text, const char *, cid, ULONG, filename, const char 
       gtk_button_set_child(GTK_BUTTON(tmp), bitmap);
       g_object_set_data(G_OBJECT(tmp), "_dw_bitmap", bitmap);
    }
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    if(text)
       gtk_widget_set_tooltip_text(tmp, text);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
@@ -3742,7 +3890,7 @@ DW_FUNCTION_RESTORE_PARAM4(text, const char *, cid, ULONG, data, const char *, l
       gtk_button_set_child(GTK_BUTTON(tmp), bitmap);
       g_object_set_data(G_OBJECT(tmp), "_dw_bitmap", bitmap);
    }
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    if(text)
       gtk_widget_set_tooltip_text(tmp, text);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
@@ -3765,7 +3913,7 @@ DW_FUNCTION_RESTORE_PARAM2(text, const char *, cid, ULONG)
 
    gtk_spin_button_set_numeric(GTK_SPIN_BUTTON(tmp), TRUE);
    gtk_spin_button_set_wrap(GTK_SPIN_BUTTON(tmp), TRUE);
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    g_object_set_data(G_OBJECT(tmp), "_dw_adjustment", (gpointer)adj);
    g_object_set_data(G_OBJECT(adj), "_dw_spinbutton", (gpointer)tmp);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
@@ -3787,7 +3935,7 @@ DW_FUNCTION_RESTORE_PARAM2(text, const char *, cid, ULONG)
 {
    GtkWidget *tmp = gtk_toggle_button_new_with_label(text);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
 
    if(_DWDefaultFont)
       dw_window_set_font(tmp, _DWDefaultFont);
@@ -3810,7 +3958,7 @@ DW_FUNCTION_RESTORE_PARAM3(vertical, int, increments, int, cid, ULONG)
    GtkAdjustment *adjustment = (GtkAdjustment *)gtk_adjustment_new(0, 0, (gfloat)increments, 1, 1, 1);
    GtkWidget *tmp = gtk_scale_new(vertical ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL, adjustment);
 
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    gtk_scale_set_draw_value(GTK_SCALE(tmp), 0);
    gtk_scale_set_digits(GTK_SCALE(tmp), 0);
    g_object_set_data(G_OBJECT(tmp), "_dw_adjustment", (gpointer)adjustment);
@@ -3835,7 +3983,7 @@ DW_FUNCTION_RESTORE_PARAM2(vertical, int, cid, ULONG)
    GtkWidget *tmp = gtk_scrollbar_new(vertical ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL, adjustment);
 
    gtk_widget_set_can_focus(tmp, FALSE);
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    g_object_set_data(G_OBJECT(tmp), "_dw_adjustment", (gpointer)adjustment);
    g_object_set_data(G_OBJECT(adjustment), "_dw_scrollbar", (gpointer)tmp);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
@@ -3854,7 +4002,7 @@ DW_FUNCTION_RESTORE_PARAM1(cid, ULONG)
 
 {
    GtkWidget *tmp = gtk_progress_bar_new();
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
    DW_FUNCTION_RETURN_THIS(tmp);
 }
@@ -3871,7 +4019,7 @@ DW_FUNCTION_RETURN(dw_checkbox_new, HWND)
 DW_FUNCTION_RESTORE_PARAM2(text, const char *, cid, ULONG)
 {
    GtkWidget *tmp = gtk_check_button_new_with_label(text);
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
    if(_DWDefaultFont)
       dw_window_set_font(tmp, _DWDefaultFont);
@@ -3916,7 +4064,7 @@ DW_FUNCTION_RESTORE_PARAM2(cid, ULONG, multi, int)
          gtk_tree_selection_set_mode(sel, GTK_SELECTION_MULTIPLE);
       else
          gtk_tree_selection_set_mode(sel, GTK_SELECTION_SINGLE);
-      gtk_widget_show(tree);
+      gtk_widget_set_visible(tree, TRUE);
       if(_DWDefaultFont)
          dw_window_set_font(tmp, _DWDefaultFont);
    }
@@ -4167,7 +4315,7 @@ DW_FUNCTION_RESTORE_PARAM2(handle, HWND, bubbletext, char *)
  * Parameters:
  *       handle: Handle to the window.
  * Returns:
- *       text: The text associsated with a given window.
+ *       text: The text associated with a given window.
  */
 DW_FUNCTION_DEFINITION(dw_window_get_text, char *, HWND handle)
 DW_FUNCTION_ADD_PARAM1(handle)
@@ -5407,7 +5555,7 @@ static int _dw_container_setup_int(HWND handle, unsigned long *flags, char **tit
       gtk_tree_selection_set_mode(sel, GTK_SELECTION_MULTIPLE);
    else
       gtk_tree_selection_set_mode(sel, GTK_SELECTION_SINGLE);
-   gtk_widget_show(tree);
+   gtk_widget_set_visible(tree, TRUE);
    free(array);
    if(_DWDefaultFont)
       dw_window_set_font(handle, _DWDefaultFont);
@@ -6557,7 +6705,7 @@ DW_FUNCTION_RESTORE_PARAM1(cid, ULONG)
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
    g_signal_connect(G_OBJECT(tmp), "destroy", G_CALLBACK(_dw_render_destroy), NULL);
    gtk_widget_set_can_focus(tmp, TRUE);
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    if(_DWDefaultFont)
       dw_window_set_font(tmp, _DWDefaultFont);
    DW_FUNCTION_RETURN_THIS(tmp);
@@ -6636,6 +6784,22 @@ void API dw_color_background_set(unsigned long value)
    }
 }
 
+#if GTK_CHECK_VERSION(4,10,0)
+static void _dw_color_choose_response(GObject *gobject, GAsyncResult *result, gpointer data)
+{
+  DWDialog *tmp = data;
+  GError *error = NULL;
+  GdkRGBA *newcol = gtk_color_dialog_choose_rgba_finish(GTK_COLOR_DIALOG(gobject), result, &error);
+
+  if(error != NULL && newcol != NULL)
+  {
+      g_free(newcol);
+      newcol = NULL;
+  }
+  dw_dialog_dismiss(tmp, newcol);
+}
+#endif
+
 /* Allows the user to choose a color using the system's color chooser dialog.
  * Parameters:
  *       value: current color
@@ -6647,16 +6811,30 @@ DW_FUNCTION_ADD_PARAM1(value)
 DW_FUNCTION_RETURN(dw_color_choose, ULONG)
 DW_FUNCTION_RESTORE_PARAM1(value, ULONG)
 {
-   GtkColorChooser *cd;
    GdkRGBA color = _dw_internal_color(value);
    unsigned long retcolor = value;
    DWDialog *tmp = dw_dialog_new(NULL);
+#if GTK_CHECK_VERSION(4,10,0)
+   GtkColorDialog *cd = gtk_color_dialog_new();
+   GdkRGBA *newcol;
+
+   gtk_color_dialog_choose_rgba(cd, NULL, &color, NULL, (GAsyncReadyCallback)_dw_color_choose_response, tmp);
+
+   newcol = dw_dialog_wait(tmp);
+
+   if(newcol)
+   {
+      retcolor = DW_RGB((int)(newcol->red * 255), (int)(newcol->green * 255), (int)(newcol->blue * 255));
+      g_free(newcol);
+   }
+#else
+   GtkColorChooser *cd;
 
    cd = (GtkColorChooser *)gtk_color_chooser_dialog_new("Choose color", NULL);
    gtk_color_chooser_set_use_alpha(cd, FALSE);
    gtk_color_chooser_set_rgba(cd, &color);
 
-   gtk_widget_show(GTK_WIDGET(cd));
+   gtk_widget_set_visible(GTK_WIDGET(cd), TRUE);
    g_signal_connect(G_OBJECT(cd), "response", G_CALLBACK(_dw_dialog_response), (gpointer)tmp);
 
    if(DW_POINTER_TO_INT(dw_dialog_wait(tmp)) == GTK_RESPONSE_OK)
@@ -6666,6 +6844,7 @@ DW_FUNCTION_RESTORE_PARAM1(value, ULONG)
    }
    if(GTK_IS_WINDOW(cd))
       gtk_window_destroy(GTK_WINDOW(cd));
+#endif
    DW_FUNCTION_RETURN_THIS(retcolor);
 }
 
@@ -7349,6 +7528,24 @@ DW_FUNCTION_RESTORE_PARAM1(pixmap, HPIXMAP)
       free(pixmap->font);
    free(pixmap);
    DW_FUNCTION_RETURN_NOTHING;
+}
+
+/*
+ * Returns the width of the pixmap, same as the DW_PIXMAP_WIDTH() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_width(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->width : 0;
+}
+
+/*
+ * Returns the height of the pixmap, same as the DW_PIXMAP_HEIGHT() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_height(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->height : 0;
 }
 
 /*
@@ -8419,7 +8616,7 @@ void _dw_box_pack(HWND box, HWND item, int index, int width, int height, int hsi
    {
       item = gtk_label_new("");
       g_object_set_data(G_OBJECT(item), "_dw_padding", GINT_TO_POINTER(1));
-      gtk_widget_show(item);
+      gtk_widget_set_visible(item, TRUE);
    }
 
    /* Check if the item to be packed is a special box */
@@ -9852,16 +10049,24 @@ gboolean _dw_splitbar_set_percent(gpointer data)
 
    if(percent)
    {
+     int width, height;
+#if GTK_CHECK_VERSION(4,12,0)
+     width = gtk_widget_get_width(widget);
+     height = gtk_widget_get_height(widget);
+#else
       GtkAllocation alloc;
 
       gtk_widget_get_allocation(widget, &alloc);
+      width = alloc.width;
+      height = alloc.height;
+#endif
 
-      if(alloc.width > 10 && alloc.height > 10)
+      if(width > 10 && height > 10)
       {
          if(gtk_orientable_get_orientation(GTK_ORIENTABLE(widget)) == GTK_ORIENTATION_HORIZONTAL)
-            gtk_paned_set_position(GTK_PANED(widget), (int)(alloc.width * (*percent / 100.0)));
+            gtk_paned_set_position(GTK_PANED(widget), (int)(width * (*percent / 100.0)));
          else
-            gtk_paned_set_position(GTK_PANED(widget), (int)(alloc.height * (*percent / 100.0)));
+            gtk_paned_set_position(GTK_PANED(widget), (int)(height * (*percent / 100.0)));
          g_object_set_data(G_OBJECT(widget), "_dw_percent", NULL);
          free(percent);
       }
@@ -9912,7 +10117,7 @@ DW_FUNCTION_RESTORE_PARAM4(type, int, topleft, HWND, bottomright, HWND, cid, uns
    *percent = 50.0;
    g_object_set_data(G_OBJECT(tmp), "_dw_percent", (gpointer)percent);
    g_signal_connect(G_OBJECT(tmp), "realize", G_CALLBACK(_dw_splitbar_realize), NULL);
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    DW_FUNCTION_RETURN_THIS(tmp);
 }
 
@@ -9930,9 +10135,21 @@ DW_FUNCTION_RESTORE_PARAM2(handle, HWND, percent, float)
    int size = 0, position;
 
    if(gtk_orientable_get_orientation(GTK_ORIENTABLE(handle)) == GTK_ORIENTATION_HORIZONTAL)
+   {
+#if GTK_CHECK_VERSION(4,12,0)
+      size = gtk_widget_get_width(handle);
+#else
       size = gtk_widget_get_allocated_width(handle);
+#endif
+   }
    else
+   {
+#if GTK_CHECK_VERSION(4,12,0)
+      size = gtk_widget_get_height(handle);
+#else
       size = gtk_widget_get_allocated_height(handle);
+#endif
+   }
 
    if(mypercent)
       *mypercent = percent;
@@ -9980,7 +10197,7 @@ DW_FUNCTION_RESTORE_PARAM1(cid, ULONG)
    GTimeZone *tz = g_time_zone_new_local();
    GDateTime *now = g_date_time_new_now(tz);
 
-   gtk_widget_show(tmp);
+   gtk_widget_set_visible(tmp, TRUE);
    g_object_set_data(G_OBJECT(tmp), "_dw_id", GINT_TO_POINTER(cid));
    /* select today */
    gtk_calendar_set_show_day_names(GTK_CALENDAR(tmp), TRUE);
@@ -10201,12 +10418,48 @@ void API dw_environment_query(DWEnv *env)
    env->MajorVersion = atoi(tempbuf);
 }
 
+#if GTK_CHECK_VERSION(4,10,0)
+static void _dw_file_browse_response(GObject *gobject, GAsyncResult *result, gpointer data)
+{
+  DWDialog *tmp = data;
+  GError *error = NULL;
+  char *filename = NULL;
+  GFile *file = NULL;
+
+  /* Bail out if there is no DWDialog */
+  if(!tmp)
+    return;
+
+  switch(DW_POINTER_TO_INT(tmp->data))
+  {
+     case DW_DIRECTORY_OPEN:
+        file = gtk_file_dialog_select_folder_finish(GTK_FILE_DIALOG(gobject), result, &error);
+        break;
+     case DW_FILE_OPEN:
+        file = gtk_file_dialog_open_finish(GTK_FILE_DIALOG(gobject), result, &error);
+        break;
+     case DW_FILE_SAVE:
+        file = gtk_file_dialog_save_finish(GTK_FILE_DIALOG(gobject), result, &error);
+        break;
+     default:
+        break;
+   }
+
+  if(error == NULL && file != NULL)
+  {
+    filename = g_file_get_path(file);
+    g_object_unref(G_OBJECT(file));
+  }
+  dw_dialog_dismiss(tmp, filename);
+}
+#endif
+
 /*
  * Opens a file dialog and queries user selection.
  * Parameters:
  *       title: Title bar text for dialog.
  *       defpath: The default path of the open dialog.
- *       ext: Default file extention.
+ *       ext: Default file extension.
  *       flags: DW_FILE_OPEN or DW_FILE_SAVE or DW_DIRECTORY_OPEN
  * Returns:
  *       NULL on error. A malloced buffer containing
@@ -10218,15 +10471,68 @@ DW_FUNCTION_ADD_PARAM4(title, defpath, ext, flags)
 DW_FUNCTION_RETURN(dw_file_browse, char *)
 DW_FUNCTION_RESTORE_PARAM4(title, const char *, defpath, const char *, ext, const char *, flags, int)
 {
-   GtkWidget *filew;
-
-   GtkFileChooserAction action;
-   GtkFileFilter *filter1 = NULL;
-   GtkFileFilter *filter2 = NULL;
-   gchar *button = NULL;
-   char *filename = NULL;
    char buf[1001] = {0};
-   DWDialog *tmp = dw_dialog_new(NULL);
+   char *filename = NULL;
+   DWDialog *tmp = dw_dialog_new(DW_INT_TO_POINTER(flags));
+#if GTK_CHECK_VERSION(4,10,0)
+   GtkFileDialog *dialog = gtk_file_dialog_new();
+
+   gtk_file_dialog_set_title(dialog, title);
+   if(defpath)
+   {
+      GFile *path = g_file_new_for_path(defpath);
+
+      /* See if the path exists */
+      if(path)
+      {
+         /* If the path is a directory... set the current folder */
+         if(g_file_query_file_type(path, G_FILE_QUERY_INFO_NONE, NULL) == G_FILE_TYPE_DIRECTORY)
+            gtk_file_dialog_set_initial_folder(dialog, path);
+         else
+            gtk_file_dialog_set_initial_file(dialog, path);
+
+         g_object_unref(G_OBJECT(path));
+      }
+   }
+   if(ext)
+   {
+      GListStore *filters = g_list_store_new (GTK_TYPE_FILE_FILTER);
+      GtkFileFilter *filter = gtk_file_filter_new();
+      snprintf(buf, 1000, "*.%s", ext);
+      gtk_file_filter_add_pattern(filter, (gchar *)buf);
+      snprintf(buf, 1000, "\"%s\" files", ext);
+      gtk_file_filter_set_name(filter, (gchar *)buf);
+      g_list_store_append(filters, filter);
+      filter = gtk_file_filter_new();
+      gtk_file_filter_add_pattern(filter, (gchar *)"*");
+      gtk_file_filter_set_name(filter, (gchar *)"All Files");
+      g_list_store_append(filters, filter);
+      gtk_file_dialog_set_filters(dialog, G_LIST_MODEL(filters));
+   }
+
+   switch(flags)
+   {
+      case DW_DIRECTORY_OPEN:
+         gtk_file_dialog_select_folder(dialog, NULL, NULL, (GAsyncReadyCallback)_dw_file_browse_response, tmp);
+         break;
+      case DW_FILE_OPEN:
+         gtk_file_dialog_open(dialog, NULL, NULL, (GAsyncReadyCallback)_dw_file_browse_response, tmp);
+         break;
+      case DW_FILE_SAVE:
+         gtk_file_dialog_save(dialog, NULL, NULL, (GAsyncReadyCallback)_dw_file_browse_response, tmp);
+         break;
+      default:
+         dw_messagebox( "Coding error", DW_MB_OK|DW_MB_ERROR, "dw_file_browse() flags argument invalid.");
+         tmp = NULL;
+         break;
+   }
+
+   if(tmp)
+     filename = dw_dialog_wait(tmp);
+#else
+   GtkWidget *filew;
+   GtkFileChooserAction action;
+   gchar *button = NULL;
 
    switch(flags)
    {
@@ -10258,16 +10564,16 @@ DW_FUNCTION_RESTORE_PARAM4(title, const char *, defpath, const char *, ext, cons
 
       if(ext)
       {
-         filter1 = gtk_file_filter_new();
+         GtkFileFilter *filter = gtk_file_filter_new();
          snprintf(buf, 1000, "*.%s", ext);
-         gtk_file_filter_add_pattern( filter1, (gchar *)buf);
+         gtk_file_filter_add_pattern(filter, (gchar *)buf);
          snprintf(buf, 1000, "\"%s\" files", ext);
-         gtk_file_filter_set_name(filter1, (gchar *)buf);
-         filter2 = gtk_file_filter_new();
-         gtk_file_filter_add_pattern(filter2, (gchar *)"*");
-         gtk_file_filter_set_name(filter2, (gchar *)"All Files");
-         gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(filew), filter1);
-         gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(filew), filter2);
+         gtk_file_filter_set_name(filter, (gchar *)buf);
+         gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(filew), filter);
+         filter = gtk_file_filter_new();
+         gtk_file_filter_add_pattern(filter, (gchar *)"*");
+         gtk_file_filter_set_name(filter, (gchar *)"All Files");
+         gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(filew), filter);
       }
 
       if(defpath)
@@ -10287,7 +10593,7 @@ DW_FUNCTION_RESTORE_PARAM4(title, const char *, defpath, const char *, ext, cons
          }
       }
 
-      gtk_widget_show(GTK_WIDGET(filew));
+      gtk_widget_set_visible(GTK_WIDGET(filew), TRUE);
       g_signal_connect(G_OBJECT(filew), "response", G_CALLBACK(_dw_dialog_response), (gpointer)tmp);
 
       if(DW_POINTER_TO_INT(dw_dialog_wait(tmp)) == GTK_RESPONSE_ACCEPT)
@@ -10300,6 +10606,7 @@ DW_FUNCTION_RESTORE_PARAM4(title, const char *, defpath, const char *, ext, cons
       if(GTK_IS_WINDOW(filew))
          gtk_window_destroy(GTK_WINDOW(filew));
    }
+#endif
    DW_FUNCTION_RETURN_THIS(filename);
 }
 
@@ -10452,7 +10759,7 @@ int API dw_html_raw(HWND handle, const char *string)
    if((web_view = _dw_html_web_view(handle)))
    {
       webkit_web_view_load_html(web_view, string, "file:///");
-      gtk_widget_show(GTK_WIDGET(handle));
+      gtk_widget_set_visible(GTK_WIDGET(handle), TRUE);
    }
    return DW_ERROR_NONE;
 #else
@@ -10477,7 +10784,7 @@ int API dw_html_url(HWND handle, const char *url)
    if((web_view = _dw_html_web_view(handle)))
    {
       webkit_web_view_load_uri(web_view, url);
-      gtk_widget_show(GTK_WIDGET(handle));
+      gtk_widget_set_visible(GTK_WIDGET(handle), TRUE);
    }
    return DW_ERROR_NONE;
 #else
@@ -10500,12 +10807,74 @@ int API dw_html_javascript_run(HWND handle, const char *script, void *scriptdata
 #ifdef USE_WEBKIT
    WebKitWebView *web_view;
 
-   if((web_view = _dw_html_web_view(handle)))
+   if(script && (web_view = _dw_html_web_view(handle)))
+#ifdef USE_WEBKIT6
+      webkit_web_view_evaluate_javascript(web_view, script, strlen(script), NULL, NULL, NULL, _dw_html_result_event, scriptdata);
+#else
       webkit_web_view_run_javascript(web_view, script, NULL, _dw_html_result_event, scriptdata);
+#endif
    return DW_ERROR_NONE;
 #else
    return DW_ERROR_UNKNOWN;
 #endif
+}
+
+/* Free the name when the signal disconnects */
+void _dw_html_message_disconnect(gpointer gdata, GClosure *closure)
+{
+    gpointer *data = (gpointer *)gdata;
+
+    if(data)
+    {
+        gchar *name = (gchar *)data[1];
+        
+        if(name)
+            g_free(name);
+        free(data);
+    }
+}
+
+/*
+ * Install a javascript function with name that can call native code.
+ * Parameters:
+ *       handle: Handle to the HTML window.
+ *       name: Javascript function name.
+ * Notes: A DW_SIGNAL_HTML_MESSAGE event will be raised with scriptdata.
+ * Returns:
+ *       DW_ERROR_NONE (0) on success.
+ */
+int API dw_html_javascript_add(HWND handle, const char *name)
+{
+#ifdef USE_WEBKIT
+   WebKitWebView *web_view= _dw_html_web_view(handle);
+   WebKitUserContentManager *manager;
+
+    if(web_view && (manager = webkit_web_view_get_user_content_manager(web_view)) && name) 
+    {
+        /* Script to inject that will call the handler we are adding */
+        gchar *script = g_strdup_printf("function %s(body) {window.webkit.messageHandlers.%s.postMessage(body);}", 
+                            name, name);
+        gchar *signal = g_strdup_printf("script-message-received::%s", name);
+        WebKitUserScript *userscript = webkit_user_script_new(script, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
+                                                              WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+        gpointer *data = calloc(sizeof(gpointer), 2);
+        
+        data[0] = handle;
+        data[1] = g_strdup(name);
+        g_signal_connect_data(manager, signal, G_CALLBACK(_dw_html_message_event), data, _dw_html_message_disconnect, 0);
+        webkit_user_content_manager_register_script_message_handler(manager, name
+#if USE_WEBKIT6
+                                                                    , NULL
+#endif
+        );
+        webkit_user_content_manager_add_script(manager, userscript);
+
+        g_free(script);
+        g_free(signal);
+        return DW_ERROR_NONE;
+    }
+#endif
+    return DW_ERROR_UNKNOWN;
 }
 
 /*
@@ -10530,7 +10899,7 @@ DW_FUNCTION_RESTORE_PARAM1(DW_UNUSED(cid), ULONG)
    webkit_web_view_set_settings(web_view, settings);
    widget = (GtkWidget *)web_view;
    g_object_set_data(G_OBJECT(widget), "_dw_id", GINT_TO_POINTER(cid));
-   gtk_widget_show(widget);
+   gtk_widget_set_visible(widget, TRUE);
 #else
    dw_debug( "HTML widget not available; you do not have access to webkit.\n" );
 #endif
@@ -11072,14 +11441,26 @@ GObject *_dw_focus_setup(struct _dw_signal_list *signal, GObject *object, void *
 #ifdef USE_WEBKIT
 GObject *_dw_html_setup(struct _dw_signal_list *signal, GObject *object, void *sigfunc, void *discfunc, void *data)
 {
-   if(WEBKIT_IS_WEB_VIEW(object) && strcmp(signal->name, DW_SIGNAL_HTML_RESULT) == 0)
+   if(WEBKIT_IS_WEB_VIEW(object))
    {
-      /* We don't actually need a signal handler here... just need to assign the handler ID
-       * Since the handler is created in dw_html_javasript_run()
-       */
-      int sigid = _dw_set_signal_handler(object, (HWND)object, sigfunc, data, signal->func, discfunc);
-      g_object_set_data(object, "_dw_html_result_id", GINT_TO_POINTER(sigid+1));
-      return NULL;
+       if(strcmp(signal->name, DW_SIGNAL_HTML_RESULT) == 0)
+       {
+          /* We don't actually need a signal handler here... just need to assign the handler ID
+           * Since the handler is created in dw_html_javasript_run()
+           */
+          int sigid = _dw_set_signal_handler(object, (HWND)object, sigfunc, data, signal->func, discfunc);
+          g_object_set_data(object, "_dw_html_result_id", GINT_TO_POINTER(sigid+1));
+          return NULL;
+       }
+       else if(strcmp(signal->name, DW_SIGNAL_HTML_MESSAGE) == 0)
+       {
+          /* We don't actually need a signal handler here... just need to assign the handler ID
+           * Since the handler is created in dw_html_javasript_add()
+           */
+          int sigid = _dw_set_signal_handler(object, (HWND)object, sigfunc, data, signal->func, discfunc);
+          g_object_set_data(object, "_dw_html_message_id", GINT_TO_POINTER(sigid+1));
+          return NULL;
+      }
    }
    return object;
 }
@@ -11290,11 +11671,13 @@ int API dw_feature_get(DWFEATURE feature)
 #ifdef USE_WEBKIT
         case DW_FEATURE_HTML:
         case DW_FEATURE_HTML_RESULT:
+        case DW_FEATURE_HTML_MESSAGE:
 #endif
         case DW_FEATURE_NOTIFICATION:
         case DW_FEATURE_UTF8_UNICODE:
         case DW_FEATURE_MLE_WORD_WRAP:
         case DW_FEATURE_TREE:
+        case DW_FEATURE_RENDER_SAFE:
             return DW_FEATURE_ENABLED;
         case DW_FEATURE_WINDOW_PLACEMENT:
             return dw_x11_check(DW_FEATURE_ENABLED, DW_FEATURE_UNSUPPORTED);
@@ -11324,11 +11707,13 @@ int API dw_feature_set(DWFEATURE feature, int state)
 #ifdef USE_WEBKIT
         case DW_FEATURE_HTML:
         case DW_FEATURE_HTML_RESULT:
+        case DW_FEATURE_HTML_MESSAGE:
 #endif
         case DW_FEATURE_NOTIFICATION:
         case DW_FEATURE_UTF8_UNICODE:
         case DW_FEATURE_MLE_WORD_WRAP:
         case DW_FEATURE_TREE:
+        case DW_FEATURE_RENDER_SAFE:
             return DW_ERROR_GENERAL;
         case DW_FEATURE_WINDOW_PLACEMENT:
             return dw_x11_check(DW_ERROR_GENERAL, DW_FEATURE_UNSUPPORTED);

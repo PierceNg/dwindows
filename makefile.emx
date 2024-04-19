@@ -60,10 +60,10 @@ dirent.obj: os2/dirent.c
 dwtest.obj: dwtest.c
 	$(CC) $(CFLAGS) -c $<	
 
-dwtestoo.obj: dwtestoo.cpp
+dwtestoo.obj: dwtestoo.cpp dw.hpp
 	$(CC) $(CFLAGS) -std=c++11 -c $<	
 
 
 zip: dw.dll
 	cp os2/readme-os2.txt .
-	zip dwindows-os2-$(VERDOT).zip readme-os2.txt readme.txt dw.dll dwcompat.dll dw.lib dwcompat.lib dw.h dwcompat.h
+	zip dwindows-os2-$(VERDOT).zip readme-os2.txt readme.txt dw.dll dwcompat.dll dw.lib dwcompat.lib dw.h dwcompat.h dw.hpp

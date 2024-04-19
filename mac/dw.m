@@ -2,7 +2,7 @@
  * Dynamic Windows:
  *          A GTK like implementation of the MacOS GUI using Cocoa
  *
- * (C) 2011-2022 Brian Smith <brian@dbsoft.org>
+ * (C) 2011-2023 Brian Smith <brian@dbsoft.org>
  * (C) 2011-2021 Mark Hessling <mark@rexx.org>
  *
  * Requires 10.5 or later.
@@ -188,6 +188,11 @@
 /* Handle deprecation of constants in 13.0 */
 #if defined(MAC_OS_VERSION_13_0) && ((defined(MAC_OS_X_VERSION_MAX_ALLOWED) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_VERSION_13_0) || !defined(MAC_OS_X_VERSION_MAX_ALLOWED))
 #define BUILDING_FOR_VENTURA
+#endif
+
+/* Handle deprecation of constants in 14.0 */
+#if defined(MAC_OS_VERSION_14_0) && ((defined(MAC_OS_X_VERSION_MAX_ALLOWED) && MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_VERSION_14_0) || !defined(MAC_OS_X_VERSION_MAX_ALLOWED))
+#define BUILDING_FOR_SONOMA
 #endif
 
 #ifdef __clang__
@@ -521,6 +526,22 @@ pthread_key_t _dw_bg_color_key;
 static int DWOSMajor, DWOSMinor, DWOSBuild;
 static char _dw_bundle_path[PATH_MAX+1] = { 0 };
 static char _dw_app_id[_DW_APP_ID_SIZE+1]= {0};
+static int _dw_render_safe_mode = DW_FEATURE_DISABLED;
+static id _dw_render_expose = nil;
+
+/* Return TRUE if it is safe to draw on the window handle.
+ * Either we are in unsafe mode, or we are in an EXPOSE
+ * event for the requested render window handle.
+ */
+int _dw_render_safe_check(id handle)
+{
+    if(_dw_render_safe_mode == DW_FEATURE_DISABLED || 
+       (handle && _dw_render_expose == handle))
+           return TRUE;
+    return FALSE;
+}
+
+int _dw_is_render(id handle);
 
 /* Create a default colors for a thread */
 void _dw_init_colors(void)
@@ -592,9 +613,7 @@ typedef struct
 } DWSignalList;
 
 /* List of signals */
-#define SIGNALMAX 19
-
-static DWSignalList DWSignalTranslate[SIGNALMAX] = {
+static DWSignalList DWSignalTranslate[] = {
     { _DW_EVENT_CONFIGURE,       DW_SIGNAL_CONFIGURE },
     { _DW_EVENT_KEY_PRESS,       DW_SIGNAL_KEY_PRESS },
     { _DW_EVENT_BUTTON_PRESS,    DW_SIGNAL_BUTTON_PRESS },
@@ -613,7 +632,8 @@ static DWSignalList DWSignalTranslate[SIGNALMAX] = {
     { _DW_EVENT_TREE_EXPAND,     DW_SIGNAL_TREE_EXPAND },
     { _DW_EVENT_COLUMN_CLICK,    DW_SIGNAL_COLUMN_CLICK },
     { _DW_EVENT_HTML_RESULT,     DW_SIGNAL_HTML_RESULT },
-    { _DW_EVENT_HTML_CHANGED,    DW_SIGNAL_HTML_CHANGED }
+    { _DW_EVENT_HTML_CHANGED,    DW_SIGNAL_HTML_CHANGED },
+    { _DW_EVENT_HTML_MESSAGE,    DW_SIGNAL_HTML_MESSAGE }
 };
 
 int _dw_event_handler1(id object, NSEvent *event, int message)
@@ -733,12 +753,17 @@ int _dw_event_handler1(id object, NSEvent *event, int message)
                 DWExpose exp;
                 int (* API exposefunc)(HWND, DWExpose *, void *) = (int (* API)(HWND, DWExpose *, void *))handler->signalfunction;
                 NSRect rect = [object frame];
+                id oldrender = _dw_render_expose;
 
                 exp.x = rect.origin.x;
                 exp.y = rect.origin.y;
                 exp.width = rect.size.width;
                 exp.height = rect.size.height;
+                /* The render expose is only valid for render class windows */
+                if(_dw_render_safe_mode == DW_FEATURE_ENABLED && _dw_is_render(object))
+                    _dw_render_expose = object;
                 int result = exposefunc(object, &exp, handler->data);
+                _dw_render_expose = oldrender;
 #ifndef BUILDING_FOR_MOJAVE
                 [[object window] flushWindow];
 #endif
@@ -877,7 +902,8 @@ int _dw_event_handler1(id object, NSEvent *event, int message)
                 void **params = (void **)event;
                 NSString *result = params[0];
 
-                return htmlresultfunc(handler->window, [result length] ? DW_ERROR_NONE : DW_ERROR_UNKNOWN, [result length] ? (char *)[result UTF8String] : NULL, params[1], handler->data);
+                return htmlresultfunc(handler->window, [result length] ? DW_ERROR_NONE : DW_ERROR_UNKNOWN, [result length] ? 
+                                      (char *)[result UTF8String] : NULL, params[1], handler->data);
             }
             /* HTML changed event */
             case _DW_EVENT_HTML_CHANGED:
@@ -888,6 +914,17 @@ int _dw_event_handler1(id object, NSEvent *event, int message)
 
                 return htmlchangedfunc(handler->window, DW_POINTER_TO_INT(params[0]), (char *)[uri UTF8String], handler->data);
             }
+#if WK_API_ENABLED
+            /* HTML message event */
+            case _DW_EVENT_HTML_MESSAGE:
+            {
+                int (* API htmlmessagefunc)(HWND, char *, char *, void *) = handler->signalfunction;
+                WKScriptMessage *message = (WKScriptMessage *)event;
+
+                return htmlmessagefunc(handler->window, (char *)[[message name] UTF8String], [[message body] isKindOfClass:[NSString class]] ?
+                                       (char *)[[message body] UTF8String] : NULL, handler->data);
+            }
+#endif
         }
     }
     return -1;
@@ -1252,6 +1289,14 @@ typedef struct _bitbltinfo
 -(BOOL)acceptsFirstResponder { return YES; }
 @end
 
+/* So we can check before DWRender is declared */
+int _dw_is_render(id handle)
+{
+    if([handle isMemberOfClass:[DWRender class]])
+        return TRUE;
+    return FALSE;
+}
+
 @implementation DWObject
 -(void)uselessThread:(id)sender { /* Thread only to initialize threading */ }
 #ifndef BUILDING_FOR_MOJAVE
@@ -1447,7 +1492,7 @@ DWObject *DWObj;
  * WKWebKit on intel 64 and the old WebKit on intel 32 bit and earlier.
  */
 #if WK_API_ENABLED
-@interface DWWebView : WKWebView <WKNavigationDelegate>
+@interface DWWebView : WKWebView <WKNavigationDelegate, WKScriptMessageHandler>
 {
     void *userdata;
 }
@@ -1457,6 +1502,7 @@ DWObject *DWObj;
 -(void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation;
 -(void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation;
 -(void)webView:(WKWebView *)webView didReceiveServerRedirectForProvisionalNavigation:(WKNavigation *)navigation;
+-(void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message;
 @end
 
 @implementation DWWebView : WKWebView
@@ -1481,6 +1527,10 @@ DWObject *DWObj;
 {
     void *params[2] = { DW_INT_TO_POINTER(DW_HTML_CHANGE_REDIRECT), [[self URL] absoluteString] };
     _dw_event_handler(self, (NSEvent *)params, _DW_EVENT_HTML_CHANGED);
+}
+-(void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message
+{
+    _dw_event_handler(self, (NSEvent *)message, _DW_EVENT_HTML_MESSAGE);
 }
 -(void)dealloc { UserData *root = userdata; _dw_remove_userdata(&root, NULL, TRUE); dw_signal_disconnect_by_window(self); [super dealloc]; }
 @end
@@ -3695,7 +3745,7 @@ ULONG _dw_findsigmessage(const char *signame)
 {
     int z;
 
-    for(z=0;z<SIGNALMAX;z++)
+    for(z=0;z<(_DW_EVENT_MAX-1);z++)
     {
         if(strcasecmp(signame, DWSignalTranslate[z].name) == 0)
             return DWSignalTranslate[z].message;
@@ -4294,7 +4344,7 @@ void API dw_free(void *ptr)
  * current user directory.  Or the root directory (C:\ on
  * OS/2 and Windows).
  */
-char *dw_user_dir(void)
+char * API dw_user_dir(void)
 {
     static char _user_dir[PATH_MAX+1] = { 0 };
 
@@ -4335,7 +4385,7 @@ char * API dw_app_dir(void)
  *          The appname is only required on Windows.  If NULL is passed the detected
  *          application name will be used, but a prettier name may be desired.
  */
-int dw_app_id_set(const char *appid, const char *appname)
+int API dw_app_id_set(const char *appid, const char *appname)
 {
     strncpy(_dw_app_id, appid, _DW_APP_ID_SIZE);
     return DW_ERROR_NONE;
@@ -4349,18 +4399,20 @@ int dw_app_id_set(const char *appid, const char *appname)
  */
 void API dw_debug(const char *format, ...)
 {
-   va_list args;
+    va_list args;
 
-   va_start(args, format);
-   dw_vdebug(format, args);
-   va_end(args);
+    va_start(args, format);
+    dw_vdebug(format, args);
+    va_end(args);
 }
 
 void API dw_vdebug(const char *format, va_list args)
 {
-   NSString *nformat = [[NSString stringWithUTF8String:format] autorelease];
+    DW_LOCAL_POOL_IN;
+    NSString *nformat = [NSString stringWithUTF8String:format];
 
-   NSLogv(nformat, args);
+    NSLogv(nformat, args);
+    DW_LOCAL_POOL_OUT;
 }
 
 /*
@@ -4384,6 +4436,7 @@ int API dw_messagebox(const char *title, int flags, const char *format, ...)
 
 int API dw_vmessagebox(const char *title, int flags, const char *format, va_list args)
 {
+    DW_LOCAL_POOL_IN;
     NSInteger iResponse;
     NSString *button1 = @"OK";
     NSString *button2 = nil;
@@ -4392,6 +4445,7 @@ int API dw_vmessagebox(const char *title, int flags, const char *format, va_list
     NSString *mtext;
     NSAlertStyle mstyle = DWAlertStyleWarning;
     NSArray *params;
+    int retval = 0;
 
     if(flags & DW_MB_OKCANCEL)
     {
@@ -4424,20 +4478,22 @@ int API dw_vmessagebox(const char *title, int flags, const char *format, va_list
     {
         case NSAlertFirstButtonReturn:    /* user pressed OK */
             if(flags & DW_MB_YESNO || flags & DW_MB_YESNOCANCEL)
-            {
-                return DW_MB_RETURN_YES;
-            }
-            return DW_MB_RETURN_OK;
+                retval = DW_MB_RETURN_YES;
+            else
+                retval = DW_MB_RETURN_OK;
+            break;
         case NSAlertSecondButtonReturn:  /* user pressed Cancel */
             if(flags & DW_MB_OKCANCEL)
-            {
-                return DW_MB_RETURN_CANCEL;
-            }
-            return DW_MB_RETURN_NO;
+                retval = DW_MB_RETURN_CANCEL;
+            else
+                retval = DW_MB_RETURN_NO;
+            break;
         case NSAlertThirdButtonReturn:      /* user pressed the third button */
-            return DW_MB_RETURN_CANCEL;
+            retval = DW_MB_RETURN_CANCEL;
+            break;
     }
-    return 0;
+    DW_LOCAL_POOL_OUT;
+    return retval;
 }
 
 /*
@@ -4665,7 +4721,7 @@ char * API dw_file_browse(const char *title, const char *defpath, const char *ex
  *       Pointer to an allocated string of text or NULL if clipboard empty or contents could not
  *       be converted to text.
  */
-char *dw_clipboard_get_text()
+char * API dw_clipboard_get_text(void)
 {
     NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
     NSString *str = [pasteboard stringForType:DWPasteboardTypeString];
@@ -4681,7 +4737,7 @@ char *dw_clipboard_get_text()
  * Parameters:
  *       Text.
  */
-void dw_clipboard_set_text(const char *str, int len)
+void API dw_clipboard_set_text(const char *str, int len)
 {
     NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
     SEL scc = NSSelectorFromString(@"clearContents");
@@ -5839,7 +5895,13 @@ HWND API dw_percent_new(ULONG cid)
 {
     DWPercent *percent = [[[DWPercent alloc] init] retain];
     [percent setStyle:DWProgressIndicatorStyleBar];
+    /* This is deprecated in 14.0 and does nothing in 10.15 and later...
+     * So don't compile if targeting 10.15 or higher and using SDK 14 or later
+     */
+#if !defined(MAC_OS_VERSION_14_0) || (defined(MAC_OS_X_VERSION_MIN_REQUIRED) && defined(MAC_OS_X_VERSION_10_15) && \
+    MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_15)
     [percent setBezeled:YES];
+#endif
     [percent setMaxValue:100];
     [percent setMinValue:0];
     [percent incrementBy:1];
@@ -6982,17 +7044,22 @@ DW_FUNCTION_RESTORE_PARAM4(handle, HWND, pixmap, HPIXMAP, x, int, y, int)
         bi = (id)pixmap->image;
     else
     {
-#ifdef BUILDING_FOR_MOJAVE
-        if([image isMemberOfClass:[DWRender class]])
+        if(_dw_render_safe_check(handle))
         {
-            DWRender *render = image;
+#ifdef BUILDING_FOR_MOJAVE
+            if([image isMemberOfClass:[DWRender class]])
+            {
+                DWRender *render = image;
 
-            bi = [render cachedDrawingRep];
-        }
+                bi = [render cachedDrawingRep];
+            }
 #else
-        if((bCanDraw = [image lockFocusIfCanDraw]) == YES)
-            _DWLastDrawable = handle;
+            if((bCanDraw = [image lockFocusIfCanDraw]) == YES)
+                _DWLastDrawable = handle;
 #endif
+        } 
+        else
+            bCanDraw = NO;
     }
     if(bi)
     {
@@ -7046,17 +7113,22 @@ DW_FUNCTION_RESTORE_PARAM6(handle, HWND, pixmap, HPIXMAP, x1, int, y1, int, x2, 
         bi = (id)pixmap->image;
     else
     {
-#ifdef BUILDING_FOR_MOJAVE
-        if([image isMemberOfClass:[DWRender class]])
+        if(_dw_render_safe_check(handle))
         {
-            DWRender *render = image;
+#ifdef BUILDING_FOR_MOJAVE
+            if([image isMemberOfClass:[DWRender class]])
+            {
+                DWRender *render = image;
 
-            bi = [render cachedDrawingRep];
-        }
+                bi = [render cachedDrawingRep];
+            }
 #else
-        if((bCanDraw = [image lockFocusIfCanDraw]) == YES)
-            _DWLastDrawable = handle;
+            if((bCanDraw = [image lockFocusIfCanDraw]) == YES)
+                _DWLastDrawable = handle;
 #endif
+        }
+        else
+            bCanDraw = NO;
     }
     if(bi)
     {
@@ -7121,14 +7193,19 @@ DW_FUNCTION_RESTORE_PARAM5(handle, HWND, pixmap, HPIXMAP, x, int, y, int, text, 
     }
     else if(image && [image isMemberOfClass:[DWRender class]])
     {
-        render = image;
-        font = [render font];
+        if(_dw_render_safe_check(handle))
+        {
+            render = image;
+            font = [render font];
 #ifdef BUILDING_FOR_MOJAVE
-        bi = [render cachedDrawingRep];
+            bi = [render cachedDrawingRep];
 #else
-        if((bCanDraw = [image lockFocusIfCanDraw]) == YES)
-            _DWLastDrawable = handle;
+            if((bCanDraw = [image lockFocusIfCanDraw]) == YES)
+                _DWLastDrawable = handle;
 #endif
+        }
+        else
+            bCanDraw = NO;
     }
     if(bi)
     {
@@ -7253,20 +7330,25 @@ DW_FUNCTION_RESTORE_PARAM6(handle, HWND, pixmap, HPIXMAP, flags, int, npoints, i
         bi = (id)pixmap->image;
     else
     {
+        if(_dw_render_safe_check(handle))
+        {
 #ifdef BUILDING_FOR_MOJAVE
-        if([image isMemberOfClass:[DWRender class]])
-        {
-            DWRender *render = image;
+            if([image isMemberOfClass:[DWRender class]])
+            {
+                DWRender *render = image;
 
-            bi = [render cachedDrawingRep];
-        }
+                bi = [render cachedDrawingRep];
+            }
 #else
-        if((bCanDraw = [image lockFocusIfCanDraw]) == YES)
-        {
-            _DWLastDrawable = handle;
-            [[NSGraphicsContext currentContext] setShouldAntialias:(flags & DW_DRAW_NOAA ? NO : YES)];
-        }
+            if((bCanDraw = [image lockFocusIfCanDraw]) == YES)
+            {
+                _DWLastDrawable = handle;
+                [[NSGraphicsContext currentContext] setShouldAntialias:(flags & DW_DRAW_NOAA ? NO : YES)];
+            }
 #endif
+        }
+        else
+            bCanDraw = NO;
     }
     if(bi)
     {
@@ -7332,20 +7414,25 @@ DW_FUNCTION_RESTORE_PARAM7(handle, HWND, pixmap, HPIXMAP, flags, int, x, int, y,
         bi = (id)pixmap->image;
     else
     {
+        if(_dw_render_safe_check(handle))
+        {
 #ifdef BUILDING_FOR_MOJAVE
-        if([image isMemberOfClass:[DWRender class]])
-        {
-            DWRender *render = image;
+            if([image isMemberOfClass:[DWRender class]])
+            {
+                DWRender *render = image;
 
-            bi = [render cachedDrawingRep];
-        }
+                bi = [render cachedDrawingRep];
+            }
 #else
-        if((bCanDraw = [image lockFocusIfCanDraw]) == YES)
-        {
-            _DWLastDrawable = handle;
-            [[NSGraphicsContext currentContext] setShouldAntialias:(flags & DW_DRAW_NOAA ? NO : YES)];
-        }
+            if((bCanDraw = [image lockFocusIfCanDraw]) == YES)
+            {
+                _DWLastDrawable = handle;
+                [[NSGraphicsContext currentContext] setShouldAntialias:(flags & DW_DRAW_NOAA ? NO : YES)];
+            }
 #endif
+        }
+        else
+            bCanDraw = NO;
     }
     if(bi)
     {
@@ -7406,20 +7493,25 @@ DW_FUNCTION_RESTORE_PARAM9(handle, HWND, pixmap, HPIXMAP, flags, int, xorigin, i
         bi = (id)pixmap->image;
     else
     {
+        if(_dw_render_safe_check(handle))
+        {
 #ifdef BUILDING_FOR_MOJAVE
-        if([image isMemberOfClass:[DWRender class]])
-        {
-            DWRender *render = image;
+            if([image isMemberOfClass:[DWRender class]])
+            {
+                DWRender *render = image;
 
-            bi = [render cachedDrawingRep];
-        }
+                bi = [render cachedDrawingRep];
+            }
 #else
-        if((bCanDraw = [image lockFocusIfCanDraw]) == YES)
-        {
-            _DWLastDrawable = handle;
-            [[NSGraphicsContext currentContext] setShouldAntialias:(flags & DW_DRAW_NOAA ? NO : YES)];
-        }
+            if((bCanDraw = [image lockFocusIfCanDraw]) == YES)
+            {
+                _DWLastDrawable = handle;
+                [[NSGraphicsContext currentContext] setShouldAntialias:(flags & DW_DRAW_NOAA ? NO : YES)];
+            }
 #endif
+        }
+        else
+            bCanDraw = NO;
     }
     if(bi)
     {
@@ -9200,6 +9292,24 @@ void API dw_pixmap_destroy(HPIXMAP pixmap)
 }
 
 /*
+ * Returns the width of the pixmap, same as the DW_PIXMAP_WIDTH() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_width(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->width : 0;
+}
+
+/*
+ * Returns the height of the pixmap, same as the DW_PIXMAP_HEIGHT() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_height(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->height : 0;
+}
+
+/*
  * Copies from one item to another.
  * Parameters:
  *       dest: Destination window handle.
@@ -9244,7 +9354,8 @@ int API dw_pixmap_stretch_bitblt(HWND dest, HPIXMAP destp, int xdest, int ydest,
 
     /* Sanity checks */
     if((!dest && !destp) || (!src && !srcp) ||
-       ((srcwidth == -1 || srcheight == -1) && srcwidth != srcheight))
+       ((srcwidth == -1 || srcheight == -1) && srcwidth != srcheight) ||
+           (dest && !_dw_render_safe_check(dest)))
     {
         DW_LOCAL_POOL_OUT;
         return DW_ERROR_GENERAL;
@@ -9303,7 +9414,7 @@ HWND API dw_calendar_new(ULONG cid)
  *       handle: The handle to the calendar returned by dw_calendar_new().
  *       year...
  */
-void dw_calendar_set_date(HWND handle, unsigned int year, unsigned int month, unsigned int day)
+void API dw_calendar_set_date(HWND handle, unsigned int year, unsigned int month, unsigned int day)
 {
     DWCalendar *calendar = handle;
     NSDate *date;
@@ -9326,7 +9437,7 @@ void dw_calendar_set_date(HWND handle, unsigned int year, unsigned int month, un
  * Parameters:
  *       handle: The handle to the calendar returned by dw_calendar_new().
  */
-void dw_calendar_get_date(HWND handle, unsigned int *year, unsigned int *month, unsigned int *day)
+void API dw_calendar_get_date(HWND handle, unsigned int *year, unsigned int *month, unsigned int *day)
 {
     DWCalendar *calendar = handle;
     DW_LOCAL_POOL_IN;
@@ -9423,7 +9534,7 @@ int API dw_html_url(HWND handle, const char *url)
  * Returns:
  *       DW_ERROR_NONE (0) on success.
  */
-int dw_html_javascript_run(HWND handle, const char *script, void *scriptdata)
+int API dw_html_javascript_run(HWND handle, const char *script, void *scriptdata)
 {
     DWWebView *html = handle;
     DW_LOCAL_POOL_IN;
@@ -9441,6 +9552,37 @@ int dw_html_javascript_run(HWND handle, const char *script, void *scriptdata)
 #endif
     DW_LOCAL_POOL_OUT;
     return DW_ERROR_NONE;
+}
+
+/*
+ * Install a javascript function with name that can call native code.
+ * Parameters:
+ *       handle: Handle to the HTML window.
+ *       name: Javascript function name.
+ * Notes: A DW_SIGNAL_HTML_MESSAGE event will be raised with scriptdata.
+ * Returns:
+ *       DW_ERROR_NONE (0) on success.
+ */
+int API dw_html_javascript_add(HWND handle, const char *name)
+{
+#if WK_API_ENABLED
+    DWWebView *html = handle;
+    WKUserContentController *controller = [[html configuration] userContentController];
+    
+    if(controller && name) 
+    {
+        DW_LOCAL_POOL_IN;
+        /* Script to inject that will call the handler we are adding */
+        NSString *script = [NSString stringWithFormat:@"function %s(body) {window.webkit.messageHandlers.%s.postMessage(body);}", 
+                            name, name];
+        [controller addScriptMessageHandler:handle name:[NSString stringWithUTF8String:name]];
+        [controller addUserScript:[[WKUserScript alloc] initWithSource:script 
+                injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
+        DW_LOCAL_POOL_OUT;
+        return DW_ERROR_NONE;
+    }
+#endif
+    return DW_ERROR_UNKNOWN;
 }
 
 /*
@@ -11337,7 +11479,7 @@ unsigned long API dw_color_depth_get(void)
  *          This will create a system notification that will show in the notifaction panel
  *          on supported systems, which may be clicked to perform another task.
  */
-HWND dw_notification_new(const char *title, const char *imagepath, const char *description, ...)
+HWND API dw_notification_new(const char *title, const char *imagepath, const char *description, ...)
 {
 #ifdef BUILDING_FOR_MOUNTAIN_LION
     char outbuf[1025] = {0};
@@ -11410,7 +11552,7 @@ HWND dw_notification_new(const char *title, const char *imagepath, const char *d
  * Returns:
  *         DW_ERROR_NONE on success, DW_ERROR_UNKNOWN on error or not supported.
  */
-int dw_notification_send(HWND notification)
+int API dw_notification_send(HWND notification)
 {
 #ifdef BUILDING_FOR_MOUNTAIN_LION
     if(notification)
@@ -11452,7 +11594,7 @@ int dw_notification_send(HWND notification)
  * Parameters:
  *       env: Pointer to a DWEnv struct.
  */
-void dw_environment_query(DWEnv *env)
+void API dw_environment_query(DWEnv *env)
 {
     memset(env, '\0', sizeof(DWEnv));
     strcpy(env->osName, "MacOS");
@@ -11596,7 +11738,7 @@ int _dw_remove_userdata(UserData **root, const char *varname, int all)
  *       dataname: A string pointer identifying which signal to be hooked.
  *       data: User data to be passed to the handler function.
  */
-void dw_window_set_data(HWND window, const char *dataname, void *data)
+void API dw_window_set_data(HWND window, const char *dataname, void *data)
 {
     id object = window;
     if([object isMemberOfClass:[DWWindow class]])
@@ -11613,6 +11755,14 @@ void dw_window_set_data(HWND window, const char *dataname, void *data)
     {
         NSBox *box = window;
         object = [box contentView];
+    }
+    /* Failsafe so we don't crash */
+    if(![object respondsToSelector:NSSelectorFromString(@"userdata")])
+    {
+#ifdef DEBUG
+        NSLog(@"WARNING: Object class %@ does not support dw_window_set_data()\n", [object className]);
+#endif
+        return;
     }
     WindowData *blah = (WindowData *)[object userdata];
 
@@ -11643,7 +11793,7 @@ void dw_window_set_data(HWND window, const char *dataname, void *data)
  *       dataname: A string pointer identifying which signal to be hooked.
  *       data: User data to be passed to the handler function.
  */
-void *dw_window_get_data(HWND window, const char *dataname)
+void * API dw_window_get_data(HWND window, const char *dataname)
 {
     id object = window;
     if([object isMemberOfClass:[DWWindow class]])
@@ -11660,6 +11810,14 @@ void *dw_window_get_data(HWND window, const char *dataname)
     {
         NSBox *box = window;
         object = [box contentView];
+    }
+    /* Failsafe so we don't crash */
+    if(![object respondsToSelector:NSSelectorFromString(@"userdata")])
+    {
+#ifdef DEBUG
+        NSLog(@"WARNING: Object class %@ does not support dw_window_get_data()\n", [object className]);
+#endif
+        return NULL;
     }
     WindowData *blah = (WindowData *)[object userdata];
 
@@ -11954,7 +12112,7 @@ void _dw_my_strlwr(char *buf)
  *         handle: Pointer to a module handle,
  *                 will be filled in with the handle.
  */
-int dw_module_load(const char *name, HMOD *handle)
+int API dw_module_load(const char *name, HMOD *handle)
 {
    int len;
    char *newname;
@@ -11997,7 +12155,7 @@ int dw_module_load(const char *name, HMOD *handle)
  *         func: A pointer to a function pointer, to obtain
  *               the address.
  */
-int dw_module_symbol(HMOD handle, const char *name, void**func)
+int API dw_module_symbol(HMOD handle, const char *name, void**func)
 {
    if(!func || !name)
       return   -1;
@@ -12013,7 +12171,7 @@ int dw_module_symbol(HMOD handle, const char *name, void**func)
  * Parameters:
  *         handle: Module handle returned by dw_module_load()
  */
-int dw_module_close(HMOD handle)
+int API dw_module_close(HMOD handle)
 {
    if(handle)
       return dlclose(handle);
@@ -12023,7 +12181,7 @@ int dw_module_close(HMOD handle)
 /*
  * Returns the handle to an unnamed mutex semaphore.
  */
-HMTX dw_mutex_new(void)
+HMTX API dw_mutex_new(void)
 {
     HMTX mutex = malloc(sizeof(pthread_mutex_t));
 
@@ -12036,7 +12194,7 @@ HMTX dw_mutex_new(void)
  * Parameters:
  *       mutex: The handle to the mutex returned by dw_mutex_new().
  */
-void dw_mutex_close(HMTX mutex)
+void API dw_mutex_close(HMTX mutex)
 {
    if(mutex)
    {
@@ -12050,7 +12208,7 @@ void dw_mutex_close(HMTX mutex)
  * Parameters:
  *       mutex: The handle to the mutex returned by dw_mutex_new().
  */
-void dw_mutex_lock(HMTX mutex)
+void API dw_mutex_lock(HMTX mutex)
 {
     /* We need to handle locks from the main thread differently...
      * since we can't stop message processing... otherwise we
@@ -12093,7 +12251,7 @@ int API dw_mutex_trylock(HMTX mutex)
  * Parameters:
  *       mutex: The handle to the mutex returned by dw_mutex_new().
  */
-void dw_mutex_unlock(HMTX mutex)
+void API dw_mutex_unlock(HMTX mutex)
 {
    pthread_mutex_unlock(mutex);
 }
@@ -12101,7 +12259,7 @@ void dw_mutex_unlock(HMTX mutex)
 /*
  * Returns the handle to an unnamed event semaphore.
  */
-HEV dw_event_new(void)
+HEV API dw_event_new(void)
 {
    HEV eve = (HEV)malloc(sizeof(struct _dw_unix_event));
 
@@ -12128,7 +12286,7 @@ HEV dw_event_new(void)
  * Parameters:
  *       eve: The handle to the event returned by dw_event_new().
  */
-int dw_event_reset (HEV eve)
+int API dw_event_reset(HEV eve)
 {
    if(!eve)
       return DW_ERROR_NON_INIT;
@@ -12147,7 +12305,7 @@ int dw_event_reset (HEV eve)
  * Parameters:
  *       eve: The handle to the event returned by dw_event_new().
  */
-int dw_event_post (HEV eve)
+int API dw_event_post(HEV eve)
 {
    if(!eve)
       return FALSE;
@@ -12165,7 +12323,7 @@ int dw_event_post (HEV eve)
  * Parameters:
  *       eve: The handle to the event returned by dw_event_new().
  */
-int dw_event_wait(HEV eve, unsigned long timeout)
+int API dw_event_wait(HEV eve, unsigned long timeout)
 {
     int rc;
 
@@ -12205,7 +12363,7 @@ int dw_event_wait(HEV eve, unsigned long timeout)
  * Parameters:
  *       eve: The handle to the event returned by dw_event_new().
  */
-int dw_event_close(HEV *eve)
+int API dw_event_close(HEV *eve)
 {
    if(!eve || !(*eve))
       return DW_ERROR_NON_INIT;
@@ -12384,7 +12542,7 @@ static void _dw_handle_sem(int *tmpsock)
  *         name: Name given to semaphore which can be opened
  *               by other processes.
  */
-HEV dw_named_event_new(const char *name)
+HEV API dw_named_event_new(const char *name)
 {
     struct sockaddr_un un;
     int ev, *tmpsock = (int *)malloc(sizeof(int)*2);
@@ -12445,7 +12603,7 @@ HEV dw_named_event_new(const char *name)
  *         name: Name given to semaphore which can be opened
  *               by other processes.
  */
-HEV dw_named_event_get(const char *name)
+HEV API dw_named_event_get(const char *name)
 {
     struct sockaddr_un un;
     HEV eve;
@@ -12476,7 +12634,7 @@ HEV dw_named_event_get(const char *name)
  *         eve: Handle to the semaphore obtained by
  *              an open or create call.
  */
-int dw_named_event_reset(HEV eve)
+int API dw_named_event_reset(HEV eve)
 {
    /* signal reset */
    char tmp = (char)0;
@@ -12495,7 +12653,7 @@ int dw_named_event_reset(HEV eve)
  *         eve: Handle to the semaphore obtained by
  *              an open or create call.
  */
-int dw_named_event_post(HEV eve)
+int API dw_named_event_post(HEV eve)
 {
 
    /* signal post */
@@ -12517,7 +12675,7 @@ int dw_named_event_post(HEV eve)
  *         timeout: Number of milliseconds before timing out
  *                  or -1 if indefinite.
  */
-int dw_named_event_wait(HEV eve, unsigned long timeout)
+int API dw_named_event_wait(HEV eve, unsigned long timeout)
 {
    fd_set rd;
    struct timeval tv, *useme = NULL;
@@ -12567,7 +12725,7 @@ int dw_named_event_wait(HEV eve, unsigned long timeout)
  *         eve: Handle to the semaphore obtained by
  *              an open or create call.
  */
-int dw_named_event_close(HEV eve)
+int API dw_named_event_close(HEV eve)
 {
    /* Finally close the domain socket,
     * cleanup will continue in _dw_handle_sem.
@@ -12814,7 +12972,7 @@ int API dw_init(int newthread, int argc, char *argv[])
  *         size: Size in bytes of the shared memory region to allocate.
  *         name: A string pointer to a unique memory name.
  */
-HSHM dw_named_memory_new(void **dest, int size, const char *name)
+HSHM API dw_named_memory_new(void **dest, int size, const char *name)
 {
    char namebuf[1025] = {0};
    struct _dw_unix_shm *handle = malloc(sizeof(struct _dw_unix_shm));
@@ -12855,7 +13013,7 @@ HSHM dw_named_memory_new(void **dest, int size, const char *name)
  *         size: Size in bytes of the shared memory region to requested.
  *         name: A string pointer to a unique memory name.
  */
-HSHM dw_named_memory_get(void **dest, int size, const char *name)
+HSHM API dw_named_memory_get(void **dest, int size, const char *name)
 {
    char namebuf[1025];
    struct _dw_unix_shm *handle = malloc(sizeof(struct _dw_unix_shm));
@@ -12893,7 +13051,7 @@ HSHM dw_named_memory_get(void **dest, int size, const char *name)
  *         handle: Handle obtained from DB_named_memory_allocate.
  *         ptr: The memory address aquired with DB_named_memory_allocate.
  */
-int dw_named_memory_free(HSHM handle, void *ptr)
+int API dw_named_memory_free(HSHM handle, void *ptr)
 {
    struct _dw_unix_shm *h = handle;
    int rc = munmap(ptr, h->size);
@@ -12918,7 +13076,7 @@ int dw_named_memory_free(HSHM handle, void *ptr)
  *       data: Parameter(s) passed to the function.
  *       stack: Stack size of new thread (OS/2 and Windows only).
  */
-DWTID dw_thread_new(void *func, void *data, int stack)
+DWTID API dw_thread_new(void *func, void *data, int stack)
 {
     DWTID thread;
     void **tmp = malloc(sizeof(void *) * 2);
@@ -12936,7 +13094,7 @@ DWTID dw_thread_new(void *func, void *data, int stack)
 /*
  * Ends execution of current thread immediately.
  */
-void dw_thread_end(void)
+void API dw_thread_end(void)
 {
    pthread_exit(NULL);
 }
@@ -12944,7 +13102,7 @@ void dw_thread_end(void)
 /*
  * Returns the current thread's ID.
  */
-DWTID dw_thread_id(void)
+DWTID API dw_thread_id(void)
 {
    return (DWTID)pthread_self();
 }
@@ -13131,7 +13289,7 @@ int dw_exec(const char *program, int type, char **params)
  * Parameters:
  *       url: Uniform resource locator.
  */
-int dw_browse(const char *url)
+int API dw_browse(const char *url)
 {
     NSURL *myurl = [NSURL URLWithString:[NSString stringWithUTF8String:url]];
     [[NSWorkspace sharedWorkspace] openURL:myurl];
@@ -13284,11 +13442,11 @@ int API dw_print_run(HPRINT print, unsigned long flags)
         {
            /* Internal representation is flipped... so flip again so we can print */
            _dw_flip_image(image, rep2, size);
-   #ifdef DEBUG_PRINT
+#ifdef DEBUG_PRINT
            /* Save it to file to see what we have */
            NSData *data = [rep2 representationUsingType: NSPNGFileType properties: nil];
            [data writeToFile: @"print.png" atomically: NO];
-   #endif
+#endif
            /* Print the image view */
            [po runOperation];
            /* Fill the pixmap with white in case we are printing more pages */
@@ -13381,12 +13539,17 @@ int API dw_feature_get(DWFEATURE feature)
 #endif
         case DW_FEATURE_HTML:
         case DW_FEATURE_HTML_RESULT:
+#if WK_API_ENABLED
+        case DW_FEATURE_HTML_MESSAGE:
+#endif
         case DW_FEATURE_CONTAINER_STRIPE:
         case DW_FEATURE_MLE_WORD_WRAP:
         case DW_FEATURE_UTF8_UNICODE:
         case DW_FEATURE_TREE:
         case DW_FEATURE_WINDOW_PLACEMENT:
             return DW_FEATURE_ENABLED;
+        case DW_FEATURE_RENDER_SAFE:
+            return _dw_render_safe_mode;
 #ifdef BUILDING_FOR_MOJAVE
         case DW_FEATURE_DARK_MODE:
         {
@@ -13462,6 +13625,9 @@ int API dw_feature_set(DWFEATURE feature, int state)
 #endif
         case DW_FEATURE_HTML:
         case DW_FEATURE_HTML_RESULT:
+#if WK_API_ENABLED
+        case DW_FEATURE_HTML_MESSAGE:
+#endif
         case DW_FEATURE_CONTAINER_STRIPE:
         case DW_FEATURE_MLE_WORD_WRAP:
         case DW_FEATURE_UTF8_UNICODE:
@@ -13469,6 +13635,15 @@ int API dw_feature_set(DWFEATURE feature, int state)
         case DW_FEATURE_WINDOW_PLACEMENT:
             return DW_ERROR_GENERAL;
         /* These features are supported and configurable */
+        case DW_FEATURE_RENDER_SAFE:
+        {
+            if(state == DW_FEATURE_ENABLED || state == DW_FEATURE_DISABLED)
+            {
+                _dw_render_safe_mode = state;
+                return DW_ERROR_NONE;
+            }
+            return DW_ERROR_GENERAL;
+        }
 #ifdef BUILDING_FOR_MOJAVE
         case DW_FEATURE_DARK_MODE:
         {

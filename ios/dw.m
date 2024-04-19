@@ -2,7 +2,7 @@
  * Dynamic Windows:
  *          A GTK like implementation of the iOS GUI
  *
- * (C) 2011-2022 Brian Smith <brian@dbsoft.org>
+ * (C) 2011-2023 Brian Smith <brian@dbsoft.org>
  * (C) 2011-2021 Mark Hessling <mark@rexx.org>
  * (C) 2017 Ralph Shane (Base tree view implementation)
  *
@@ -354,9 +354,7 @@ typedef struct
 } DWSignalList;
 
 /* List of signals */
-#define SIGNALMAX 19
-
-static DWSignalList DWSignalTranslate[SIGNALMAX] = {
+static DWSignalList DWSignalTranslate[] = {
     { _DW_EVENT_CONFIGURE,       DW_SIGNAL_CONFIGURE },
     { _DW_EVENT_KEY_PRESS,       DW_SIGNAL_KEY_PRESS },
     { _DW_EVENT_BUTTON_PRESS,    DW_SIGNAL_BUTTON_PRESS },
@@ -375,7 +373,8 @@ static DWSignalList DWSignalTranslate[SIGNALMAX] = {
     { _DW_EVENT_TREE_EXPAND,     DW_SIGNAL_TREE_EXPAND },
     { _DW_EVENT_COLUMN_CLICK,    DW_SIGNAL_COLUMN_CLICK },
     { _DW_EVENT_HTML_RESULT,     DW_SIGNAL_HTML_RESULT },
-    { _DW_EVENT_HTML_CHANGED,    DW_SIGNAL_HTML_CHANGED }
+    { _DW_EVENT_HTML_CHANGED,    DW_SIGNAL_HTML_CHANGED },
+    { _DW_EVENT_HTML_MESSAGE,    DW_SIGNAL_HTML_MESSAGE }
 };
 
 int _dw_event_handler1(id object, id event, int message)
@@ -619,7 +618,8 @@ int _dw_event_handler1(id object, id event, int message)
                 void **params = (void **)event;
                 NSString *result = params[0];
 
-                return htmlresultfunc(handler->window, [result length] ? DW_ERROR_NONE : DW_ERROR_UNKNOWN, [result length] ? (char *)[result UTF8String] : NULL, params[1], handler->data);
+                return htmlresultfunc(handler->window, [result length] ? DW_ERROR_NONE : DW_ERROR_UNKNOWN, [result length] ?
+                                      (char *)[result UTF8String] : NULL, params[1], handler->data);
             }
             /* HTML changed event */
             case _DW_EVENT_HTML_CHANGED:
@@ -630,6 +630,15 @@ int _dw_event_handler1(id object, id event, int message)
 
                 return htmlchangedfunc(handler->window, DW_POINTER_TO_INT(params[0]), (char *)[uri UTF8String], handler->data);
             }
+            /* HTML message event */
+            case _DW_EVENT_HTML_MESSAGE:
+            {
+                int (* API htmlmessagefunc)(HWND, char *, char *, void *) = handler->signalfunction;
+                WKScriptMessage *message = (WKScriptMessage *)event;
+
+                return htmlmessagefunc(handler->window, (char *)[[message name] UTF8String], [[message body] isKindOfClass:[NSString class]] ?
+                                       (char *)[[message body] UTF8String] : NULL, handler->data);
+                }
         }
     }
     return -1;
@@ -1512,7 +1521,7 @@ BOOL _dw_is_dark(void)
     return NO;
 }
 
-@interface DWWebView : WKWebView <WKNavigationDelegate>
+@interface DWWebView : WKWebView <WKNavigationDelegate, WKScriptMessageHandler>
 {
     void *userdata;
 }
@@ -1522,6 +1531,7 @@ BOOL _dw_is_dark(void)
 -(void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation;
 -(void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation;
 -(void)webView:(WKWebView *)webView didReceiveServerRedirectForProvisionalNavigation:(WKNavigation *)navigation;
+-(void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message;
 @end
 
 @implementation DWWebView : WKWebView
@@ -1546,6 +1556,10 @@ BOOL _dw_is_dark(void)
 {
     void *params[2] = { DW_INT_TO_POINTER(DW_HTML_CHANGE_REDIRECT), [[self URL] absoluteString] };
     _dw_event_handler(self, (id)params, _DW_EVENT_HTML_CHANGED);
+}
+-(void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message
+{
+    _dw_event_handler(self, (id)message, _DW_EVENT_HTML_MESSAGE);
 }
 -(void)dealloc { UserData *root = userdata; _dw_remove_userdata(&root, NULL, TRUE); dw_signal_disconnect_by_window(self); [super dealloc]; }
 @end
@@ -3821,7 +3835,7 @@ ULONG _dw_findsigmessage(const char *signame)
 {
     int z;
 
-    for(z=0;z<SIGNALMAX;z++)
+    for(z=0;z<(_DW_EVENT_MAX-1);z++)
     {
         if(strcasecmp(signame, DWSignalTranslate[z].name) == 0)
             return DWSignalTranslate[z].message;
@@ -4305,7 +4319,7 @@ void API dw_free(void *ptr)
  * current user directory.  Or the root directory (C:\ on
  * OS/2 and Windows).
  */
-char *dw_user_dir(void)
+char * API dw_user_dir(void)
 {
     static char _user_dir[PATH_MAX+1] = { 0 };
 
@@ -4374,7 +4388,7 @@ void API dw_debug(const char *format, ...)
 
 void API dw_vdebug(const char *format, va_list args)
 {
-   NSString *nformat = [[NSString stringWithUTF8String:format] autorelease];
+   NSString *nformat = [NSString stringWithUTF8String:format];
 
    NSLogv(nformat, args);
 }
@@ -4493,7 +4507,7 @@ char * API dw_file_browse(const char *title, const char *defpath, const char *ex
  *       Pointer to an allocated string of text or NULL if clipboard empty or contents could not
  *       be converted to text.
  */
-char *dw_clipboard_get_text()
+char * API dw_clipboard_get_text(void)
 {
     UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
     NSString *str = [pasteboard string];
@@ -4507,7 +4521,7 @@ char *dw_clipboard_get_text()
  * Parameters:
  *       Text.
  */
-void dw_clipboard_set_text(const char *str, int len)
+void API dw_clipboard_set_text(const char *str, int len)
 {
     UIPasteboard *pasteboard = [UIPasteboard generalPasteboard];
 
@@ -8024,7 +8038,7 @@ DW_FUNCTION_RESTORE_PARAM2(handle, HWND, data, void *)
  * Parameters:
  *       handle: Handle to the window (widget) to be optimized.
  */
-void dw_container_optimize(HWND handle)
+void API dw_container_optimize(HWND handle)
 {
     /* TODO: Not sure if we need to implement this on iOS */
 }
@@ -8386,7 +8400,7 @@ HPIXMAP API dw_pixmap_new_from_data(HWND handle, const char *data, int len)
  *       pixmap: Handle to a pixmap returned by
  *               dw_pixmap_new..
  *       color:  transparent color
- * Note: This does nothing on Mac as transparency
+ * Note: This does nothing on iOS as transparency
  *       is handled automatically
  */
 void API dw_pixmap_set_transparent_color(HPIXMAP pixmap, ULONG color)
@@ -8482,6 +8496,24 @@ void API dw_pixmap_destroy(HPIXMAP pixmap)
         free(pixmap);
         DW_LOCAL_POOL_OUT;
     }
+}
+
+/*
+ * Returns the width of the pixmap, same as the DW_PIXMAP_WIDTH() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_width(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->width : 0;
+}
+
+/*
+ * Returns the height of the pixmap, same as the DW_PIXMAP_HEIGHT() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_height(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->height : 0;
 }
 
 /*
@@ -8734,6 +8766,39 @@ DW_FUNCTION_RESTORE_PARAM3(handle, HWND, script, const char *, scriptdata, void 
         _dw_event_handler(html, (id)params, _DW_EVENT_HTML_RESULT);
     }];
     DW_LOCAL_POOL_OUT;
+    DW_FUNCTION_RETURN_THIS(retval);
+}
+
+/*
+ * Install a javascript function with name that can call native code.
+ * Parameters:
+ *       handle: Handle to the HTML window.
+ *       name: Javascript function name.
+ * Notes: A DW_SIGNAL_HTML_MESSAGE event will be raised with scriptdata.
+ * Returns:
+ *       DW_ERROR_NONE (0) on success.
+ */
+DW_FUNCTION_DEFINITION(dw_html_javascript_add, int, HWND handle, const char *name)
+DW_FUNCTION_ADD_PARAM2(handle, name)
+DW_FUNCTION_RETURN(dw_html_javascript_add, int)
+DW_FUNCTION_RESTORE_PARAM2(handle, HWND, name, const char *)
+{
+    DWWebView *html = handle;
+    WKUserContentController *controller = [[html configuration] userContentController];
+    int retval = DW_ERROR_UNKNOWN;
+
+    if(controller && name)
+    {
+        DW_LOCAL_POOL_IN;
+        /* Script to inject that will call the handler we are adding */
+        NSString *script = [NSString stringWithFormat:@"function %s(body) {window.webkit.messageHandlers.%s.postMessage(body);}",
+                            name, name];
+        [controller addScriptMessageHandler:handle name:[NSString stringWithUTF8String:name]];
+        [controller addUserScript:[[WKUserScript alloc] initWithSource:script
+                injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO]];
+        DW_LOCAL_POOL_OUT;
+        retval = DW_ERROR_NONE;
+    }
     DW_FUNCTION_RETURN_THIS(retval);
 }
 
@@ -10408,7 +10473,7 @@ unsigned long API dw_color_depth_get(void)
  *          This will create a system notification that will show in the notifaction panel
  *          on supported systems, which may be clicked to perform another task.
  */
-HWND dw_notification_new(const char *title, const char *imagepath, const char *description, ...)
+HWND API dw_notification_new(const char *title, const char *imagepath, const char *description, ...)
 {
     char outbuf[1025] = {0};
     HWND retval = NULL;
@@ -10459,7 +10524,7 @@ HWND dw_notification_new(const char *title, const char *imagepath, const char *d
  * Returns:
  *         DW_ERROR_NONE on success, DW_ERROR_UNKNOWN on error or not supported.
  */
-int dw_notification_send(HWND notification)
+int API dw_notification_send(HWND notification)
 {
     if(notification)
     {
@@ -10488,7 +10553,7 @@ int dw_notification_send(HWND notification)
  * Parameters:
  *       env: Pointer to a DWEnv struct.
  */
-void dw_environment_query(DWEnv *env)
+void API dw_environment_query(DWEnv *env)
 {
     memset(env, '\0', sizeof(DWEnv));
     strcpy(env->osName, "iOS");
@@ -10653,25 +10718,35 @@ DW_FUNCTION_RESTORE_PARAM3(window, HWND, dataname, const char *, data, void *)
         NSArray *subviews = [sv subviews];
         object = [subviews firstObject];
     }
-    WindowData *blah = (WindowData *)[object userdata];
-
-    if(!blah)
+    /* Failsafe so we don't crash */
+    if(![object respondsToSelector:NSSelectorFromString(@"userdata")])
     {
-        if(!dataname)
-            return;
-
-        blah = calloc(1, sizeof(WindowData));
-        [object setUserdata:blah];
+#ifdef DEBUG
+        NSLog(@"WARNING: Object class %@ does not support dw_window_set_data()\n", [object className]);
+#endif
     }
-
-    if(data)
-        _dw_new_userdata(&(blah->root), dataname, data);
     else
     {
-        if(dataname)
-            _dw_remove_userdata(&(blah->root), dataname, FALSE);
+        WindowData *blah = (WindowData *)[object userdata];
+
+        if(!blah)
+        {
+            if(!dataname)
+                return;
+
+            blah = calloc(1, sizeof(WindowData));
+            [object setUserdata:blah];
+        }
+
+        if(data)
+            _dw_new_userdata(&(blah->root), dataname, data);
         else
-            _dw_remove_userdata(&(blah->root), NULL, TRUE);
+        {
+            if(dataname)
+                _dw_remove_userdata(&(blah->root), dataname, FALSE);
+            else
+                _dw_remove_userdata(&(blah->root), NULL, TRUE);
+        }
     }
     DW_FUNCTION_RETURN_NOTHING;
 }
@@ -10710,13 +10785,23 @@ DW_FUNCTION_RESTORE_PARAM2(window, HWND, dataname, const char *)
         NSArray *subviews = [sv subviews];
         object = [subviews firstObject];
     }
-    WindowData *blah = (WindowData *)[object userdata];
-
-    if(blah && blah->root && dataname)
+    /* Failsafe so we don't crash */
+    if(![object respondsToSelector:NSSelectorFromString(@"userdata")])
     {
-        UserData *ud = _dw_find_userdata(&(blah->root), dataname);
-        if(ud)
-            retval = ud->data;
+#ifdef DEBUG
+        NSLog(@"WARNING: Object class %@ does not support dw_window_get_data()\n", [object className]);
+#endif
+    }
+    else
+    {
+        WindowData *blah = (WindowData *)[object userdata];
+
+        if(blah && blah->root && dataname)
+        {
+            UserData *ud = _dw_find_userdata(&(blah->root), dataname);
+            if(ud)
+                retval = ud->data;
+        }
     }
     DW_FUNCTION_RETURN_THIS(retval);
 }
@@ -10997,7 +11082,7 @@ void _dw_my_strlwr(char *buf)
  *         handle: Pointer to a module handle,
  *                 will be filled in with the handle.
  */
-int dw_module_load(const char *name, HMOD *handle)
+int API dw_module_load(const char *name, HMOD *handle)
 {
    int len;
    char *newname;
@@ -11040,7 +11125,7 @@ int dw_module_load(const char *name, HMOD *handle)
  *         func: A pointer to a function pointer, to obtain
  *               the address.
  */
-int dw_module_symbol(HMOD handle, const char *name, void**func)
+int API dw_module_symbol(HMOD handle, const char *name, void**func)
 {
    if(!func || !name)
       return   -1;
@@ -11056,7 +11141,7 @@ int dw_module_symbol(HMOD handle, const char *name, void**func)
  * Parameters:
  *         handle: Module handle returned by dw_module_load()
  */
-int dw_module_close(HMOD handle)
+int API dw_module_close(HMOD handle)
 {
    if(handle)
       return dlclose(handle);
@@ -11066,7 +11151,7 @@ int dw_module_close(HMOD handle)
 /*
  * Returns the handle to an unnamed mutex semaphore.
  */
-HMTX dw_mutex_new(void)
+HMTX API dw_mutex_new(void)
 {
     HMTX mutex = malloc(sizeof(pthread_mutex_t));
 
@@ -11079,7 +11164,7 @@ HMTX dw_mutex_new(void)
  * Parameters:
  *       mutex: The handle to the mutex returned by dw_mutex_new().
  */
-void dw_mutex_close(HMTX mutex)
+void API dw_mutex_close(HMTX mutex)
 {
    if(mutex)
    {
@@ -11093,7 +11178,7 @@ void dw_mutex_close(HMTX mutex)
  * Parameters:
  *       mutex: The handle to the mutex returned by dw_mutex_new().
  */
-void dw_mutex_lock(HMTX mutex)
+void API dw_mutex_lock(HMTX mutex)
 {
     /* We need to handle locks from the main thread differently...
      * since we can't stop message processing... otherwise we
@@ -11133,7 +11218,7 @@ int API dw_mutex_trylock(HMTX mutex)
  * Parameters:
  *       mutex: The handle to the mutex returned by dw_mutex_new().
  */
-void dw_mutex_unlock(HMTX mutex)
+void API dw_mutex_unlock(HMTX mutex)
 {
    pthread_mutex_unlock(mutex);
 }
@@ -11141,7 +11226,7 @@ void dw_mutex_unlock(HMTX mutex)
 /*
  * Returns the handle to an unnamed event semaphore.
  */
-HEV dw_event_new(void)
+HEV API dw_event_new(void)
 {
    HEV eve = (HEV)malloc(sizeof(struct _dw_unix_event));
 
@@ -11168,7 +11253,7 @@ HEV dw_event_new(void)
  * Parameters:
  *       eve: The handle to the event returned by dw_event_new().
  */
-int dw_event_reset (HEV eve)
+int API dw_event_reset(HEV eve)
 {
    if(!eve)
       return DW_ERROR_NON_INIT;
@@ -11187,7 +11272,7 @@ int dw_event_reset (HEV eve)
  * Parameters:
  *       eve: The handle to the event returned by dw_event_new().
  */
-int dw_event_post (HEV eve)
+int API dw_event_post(HEV eve)
 {
    if(!eve)
       return FALSE;
@@ -11205,7 +11290,7 @@ int dw_event_post (HEV eve)
  * Parameters:
  *       eve: The handle to the event returned by dw_event_new().
  */
-int dw_event_wait(HEV eve, unsigned long timeout)
+int API dw_event_wait(HEV eve, unsigned long timeout)
 {
     int rc;
 
@@ -11245,7 +11330,7 @@ int dw_event_wait(HEV eve, unsigned long timeout)
  * Parameters:
  *       eve: The handle to the event returned by dw_event_new().
  */
-int dw_event_close(HEV *eve)
+int API dw_event_close(HEV *eve)
 {
    if(!eve || !(*eve))
       return DW_ERROR_NON_INIT;
@@ -11424,7 +11509,7 @@ static void _dw_handle_sem(int *tmpsock)
  *         name: Name given to semaphore which can be opened
  *               by other processes.
  */
-HEV dw_named_event_new(const char *name)
+HEV API dw_named_event_new(const char *name)
 {
     struct sockaddr_un un;
     int ev, *tmpsock = (int *)malloc(sizeof(int)*2);
@@ -11485,7 +11570,7 @@ HEV dw_named_event_new(const char *name)
  *         name: Name given to semaphore which can be opened
  *               by other processes.
  */
-HEV dw_named_event_get(const char *name)
+HEV API dw_named_event_get(const char *name)
 {
     struct sockaddr_un un;
     HEV eve;
@@ -11516,7 +11601,7 @@ HEV dw_named_event_get(const char *name)
  *         eve: Handle to the semaphore obtained by
  *              an open or create call.
  */
-int dw_named_event_reset(HEV eve)
+int API dw_named_event_reset(HEV eve)
 {
    /* signal reset */
    char tmp = (char)0;
@@ -11535,7 +11620,7 @@ int dw_named_event_reset(HEV eve)
  *         eve: Handle to the semaphore obtained by
  *              an open or create call.
  */
-int dw_named_event_post(HEV eve)
+int API dw_named_event_post(HEV eve)
 {
 
    /* signal post */
@@ -11557,7 +11642,7 @@ int dw_named_event_post(HEV eve)
  *         timeout: Number of milliseconds before timing out
  *                  or -1 if indefinite.
  */
-int dw_named_event_wait(HEV eve, unsigned long timeout)
+int API dw_named_event_wait(HEV eve, unsigned long timeout)
 {
    fd_set rd;
    struct timeval tv, *useme = NULL;
@@ -11607,7 +11692,7 @@ int dw_named_event_wait(HEV eve, unsigned long timeout)
  *         eve: Handle to the semaphore obtained by
  *              an open or create call.
  */
-int dw_named_event_close(HEV eve)
+int API dw_named_event_close(HEV eve)
 {
    /* Finally close the domain socket,
     * cleanup will continue in _dw_handle_sem.
@@ -11869,7 +11954,7 @@ int API dw_init(int newthread, int argc, char *argv[])
  *         size: Size in bytes of the shared memory region to allocate.
  *         name: A string pointer to a unique memory name.
  */
-HSHM dw_named_memory_new(void **dest, int size, const char *name)
+HSHM API dw_named_memory_new(void **dest, int size, const char *name)
 {
    char namebuf[1025] = {0};
    struct _dw_unix_shm *handle = malloc(sizeof(struct _dw_unix_shm));
@@ -11910,7 +11995,7 @@ HSHM dw_named_memory_new(void **dest, int size, const char *name)
  *         size: Size in bytes of the shared memory region to requested.
  *         name: A string pointer to a unique memory name.
  */
-HSHM dw_named_memory_get(void **dest, int size, const char *name)
+HSHM API dw_named_memory_get(void **dest, int size, const char *name)
 {
    char namebuf[1025];
    struct _dw_unix_shm *handle = malloc(sizeof(struct _dw_unix_shm));
@@ -11948,7 +12033,7 @@ HSHM dw_named_memory_get(void **dest, int size, const char *name)
  *         handle: Handle obtained from DB_named_memory_allocate.
  *         ptr: The memory address aquired with DB_named_memory_allocate.
  */
-int dw_named_memory_free(HSHM handle, void *ptr)
+int API dw_named_memory_free(HSHM handle, void *ptr)
 {
    struct _dw_unix_shm *h = handle;
    int rc = munmap(ptr, h->size);
@@ -11973,7 +12058,7 @@ int dw_named_memory_free(HSHM handle, void *ptr)
  *       data: Parameter(s) passed to the function.
  *       stack: Stack size of new thread (OS/2 and Windows only).
  */
-DWTID dw_thread_new(void *func, void *data, int stack)
+DWTID API dw_thread_new(void *func, void *data, int stack)
 {
     DWTID thread;
     void **tmp = malloc(sizeof(void *) * 2);
@@ -11991,7 +12076,7 @@ DWTID dw_thread_new(void *func, void *data, int stack)
 /*
  * Ends execution of current thread immediately.
  */
-void dw_thread_end(void)
+void API dw_thread_end(void)
 {
    pthread_exit(NULL);
 }
@@ -11999,7 +12084,7 @@ void dw_thread_end(void)
 /*
  * Returns the current thread's ID.
  */
-DWTID dw_thread_id(void)
+DWTID API dw_thread_id(void)
 {
    return (DWTID)pthread_self();
 }
@@ -12036,7 +12121,7 @@ int API dw_exec(const char *program, int type, char **params)
  * Parameters:
  *       url: Uniform resource locator.
  */
-int dw_browse(const char *url)
+int API dw_browse(const char *url)
 {
     NSURL *myurl = [NSURL URLWithString:[NSString stringWithUTF8String:url]];
     [DWApp openURL:myurl options:@{}
@@ -12172,10 +12257,12 @@ int API dw_feature_get(DWFEATURE feature)
         case DW_FEATURE_MLE_AUTO_COMPLETE:
         case DW_FEATURE_HTML:
         case DW_FEATURE_HTML_RESULT:
+        case DW_FEATURE_HTML_MESSAGE:
         case DW_FEATURE_CONTAINER_STRIPE:
         case DW_FEATURE_MLE_WORD_WRAP:
         case DW_FEATURE_UTF8_UNICODE:
         case DW_FEATURE_TREE:
+        case DW_FEATURE_RENDER_SAFE:
             return DW_FEATURE_ENABLED;
         case DW_FEATURE_CONTAINER_MODE:
             return _dw_container_mode;
@@ -12222,10 +12309,12 @@ int API dw_feature_set(DWFEATURE feature, int state)
         case DW_FEATURE_MLE_AUTO_COMPLETE:
         case DW_FEATURE_HTML:
         case DW_FEATURE_HTML_RESULT:
+        case DW_FEATURE_HTML_MESSAGE:
         case DW_FEATURE_CONTAINER_STRIPE:
         case DW_FEATURE_MLE_WORD_WRAP:
         case DW_FEATURE_UTF8_UNICODE:
         case DW_FEATURE_TREE:
+        case DW_FEATURE_RENDER_SAFE:
             return DW_ERROR_GENERAL;
         case DW_FEATURE_CONTAINER_MODE:
         {

@@ -9,7 +9,7 @@ extern "C" {
 
 /* Dynamic Windows version numbers */
 #define DW_MAJOR_VERSION 3
-#define DW_MINOR_VERSION 3
+#define DW_MINOR_VERSION 4
 #define DW_SUB_VERSION 0
 
 /* General application type defines */
@@ -108,6 +108,7 @@ extern "C" {
 #define DW_SIGNAL_TREE_EXPAND    "tree-expand"
 #define DW_SIGNAL_HTML_CHANGED   "html-changed"
 #define DW_SIGNAL_HTML_RESULT    "html-result"
+#define DW_SIGNAL_HTML_MESSAGE   "html-message"
 
 /* status of menu items */
 #define DW_MIS_ENABLED           1
@@ -126,15 +127,8 @@ extern "C" {
 /* Control size constants */
 #define DW_SIZE_AUTO    -1
 
-/* ensure we can build the Gtk port with MingW on Windows */
-#if defined(DW_USE_GTK) && defined(__MINGW32__)
-# ifndef GDK_WINDOWING_WIN32
-#   define GDK_WINDOWING_WIN32
-# endif
-#endif
-
-#if defined(__OS2__) || (defined(__WIN32__) && !defined(GDK_WINDOWING_WIN32)) || defined(__MAC__) || defined(__IOS__) || defined(__EMX__) || defined(__ANDROID__) || defined(__TEMPLATE__)
-/* OS/2, Windows or MacOS */
+#if defined(__OS2__) || defined(__WIN32__) || defined(__MAC__) || defined(__IOS__) || defined(__EMX__) || defined(__ANDROID__) || defined(__TEMPLATE__)
+/* Non-GTK platforms */
 
 #ifdef __OS2__
 # if (defined(__IBMC__) || defined(__WATCOMC__) || defined(_System)) && !defined(API)
@@ -599,11 +593,11 @@ void _dw_pool_drain(void);
 
 #if defined(MSVC) && !defined(API)
 # if defined(__MINGW32__) && defined(BUILD_DLL)
-#  define API _cdecl __declspec(dllexport)
+#  define API __cdecl __declspec(dllexport)
 # else
-#  define API _cdecl
+#  define API __cdecl
 #endif
-#define DWSIGNAL _cdecl
+#define DWSIGNAL __cdecl
 #endif
 
 #define DW_DT_LEFT               SS_LEFTNOWORDWRAP
@@ -1659,6 +1653,7 @@ typedef enum
     _DW_EVENT_COLUMN_CLICK,             /* Internal message for (container) column clicked */
     _DW_EVENT_HTML_RESULT,              /* Internal message for HTML javascript result */
     _DW_EVENT_HTML_CHANGED,             /* Internal message for HTML status changed */
+    _DW_EVENT_HTML_MESSAGE,             /* Internal message for HTML javascript message */
     _DW_EVENT_MAX
 } _DW_EVENTS;
 #endif
@@ -1845,6 +1840,8 @@ typedef enum
     DW_FEATURE_TREE,                    /* Supports the Tree Widget */
     DW_FEATURE_WINDOW_PLACEMENT,        /* Supports arbitrary window placement */
     DW_FEATURE_CONTAINER_MODE,          /* Supports alternate container view modes */
+    DW_FEATURE_HTML_MESSAGE,            /* Supports the DW_SIGNAL_HTML_MESSAGE callback */
+    DW_FEATURE_RENDER_SAFE,             /* Supports render safe drawing mode, limited to expose */
     DW_FEATURE_MAX
 } DWFEATURE;
 
@@ -2187,6 +2184,8 @@ HPIXMAP API dw_pixmap_grab(HWND handle, ULONG id);
 void API dw_pixmap_set_transparent_color( HPIXMAP pixmap, ULONG color );
 int API dw_pixmap_set_font(HPIXMAP pixmap, const char *fontname);
 void API dw_pixmap_destroy(HPIXMAP pixmap);
+unsigned long API dw_pixmap_get_width(HPIXMAP pixmap);
+unsigned long API dw_pixmap_get_height(HPIXMAP pixmap);
 void API dw_beep(int freq, int dur);
 void API dw_debug(const char *format, ...);
 void API dw_vdebug(const char *format, va_list args);
@@ -2233,6 +2232,7 @@ void API dw_html_action(HWND hwnd, int action);
 int API dw_html_raw(HWND hwnd, const char *string);
 int API dw_html_url(HWND hwnd, const char *url);
 int API dw_html_javascript_run(HWND hwnd, const char *script, void *scriptdata);
+int API dw_html_javascript_add(HWND hwnd, const char *name);
 HWND API dw_html_new(unsigned long id);
 char * API dw_clipboard_get_text(void);
 void API dw_clipboard_set_text(const char *str, int len);

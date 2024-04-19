@@ -2,7 +2,7 @@
  * Dynamic Windows:
  *          A GTK like GUI implementation template.
  *
- * (C) 2011-2022 Brian Smith <brian@dbsoft.org>
+ * (C) 2011-2023 Brian Smith <brian@dbsoft.org>
  * (C) 2011-2022 Mark Hessling <mark@rexx.org>
  *
  * Compile with $CC -I. -D__TEMPLATE__ template/dw.c 
@@ -2250,6 +2250,24 @@ void API dw_pixmap_destroy(HPIXMAP pixmap)
 }
 
 /*
+ * Returns the width of the pixmap, same as the DW_PIXMAP_WIDTH() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_width(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->width : 0;
+}
+
+/*
+ * Returns the height of the pixmap, same as the DW_PIXMAP_HEIGHT() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_height(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->height : 0;
+}
+
+/*
  * Copies from one item to another.
  * Parameters:
  *       dest: Destination window handle.
@@ -2375,6 +2393,20 @@ int API dw_html_url(HWND handle, const char *url)
 int API dw_html_javascript_run(HWND handle, const char *script, void *scriptdata)
 {
    return DW_ERROR_UNKNOWN;
+}
+
+/*
+ * Install a javascript function with name that can call native code.
+ * Parameters:
+ *       handle: Handle to the HTML window.
+ *       name: Javascript function name.
+ * Notes: A DW_SIGNAL_HTML_MESSAGE event will be raised with scriptdata.
+ * Returns:
+ *       DW_ERROR_NONE (0) on success.
+ */
+int API dw_html_javascript_add(HWND handle, const char *name)
+{
+    return DW_ERROR_UNKNOWN;
 }
 
 /*

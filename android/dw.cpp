@@ -2,10 +2,10 @@
  * Dynamic Windows:
  *          A GTK like GUI implementation of the Android GUI.
  *
- * (C) 2011-2022 Brian Smith <brian@dbsoft.org>
+ * (C) 2011-2023 Brian Smith <brian@dbsoft.org>
  * (C) 2011-2022 Mark Hessling <mark@rexx.org>
  *
- * Requires Android API 23 (Marshmallow) or higher.
+ * Requires Android API 26 (Oreo) or higher.
  *
  */
 
@@ -45,6 +45,7 @@ static char _dw_exec_dir[MAX_PATH+1] = {0};
 static char _dw_user_dir[MAX_PATH+1] = {0};
 static int _dw_android_api = 0;
 static int _dw_container_mode = DW_CONTAINER_MODE_DEFAULT;
+static int _dw_render_safe_mode = DW_FEATURE_ENABLED;
 
 static pthread_key_t _dw_env_key;
 static pthread_key_t _dw_fgcolor_key;
@@ -251,9 +252,7 @@ typedef struct
 } DWSignalList;
 
 /* List of signals */
-#define SIGNALMAX 19
-
-static DWSignalList DWSignalTranslate[SIGNALMAX] = {
+static DWSignalList DWSignalTranslate[] = {
         { _DW_EVENT_CONFIGURE,      DW_SIGNAL_CONFIGURE },
         { _DW_EVENT_KEY_PRESS,      DW_SIGNAL_KEY_PRESS },
         { _DW_EVENT_BUTTON_PRESS,   DW_SIGNAL_BUTTON_PRESS },
@@ -272,10 +271,16 @@ static DWSignalList DWSignalTranslate[SIGNALMAX] = {
         { _DW_EVENT_TREE_EXPAND,    DW_SIGNAL_TREE_EXPAND },
         { _DW_EVENT_COLUMN_CLICK,   DW_SIGNAL_COLUMN_CLICK },
         { _DW_EVENT_HTML_RESULT,    DW_SIGNAL_HTML_RESULT },
-        { _DW_EVENT_HTML_CHANGED,   DW_SIGNAL_HTML_CHANGED }
+        { _DW_EVENT_HTML_CHANGED,   DW_SIGNAL_HTML_CHANGED },
+        { _DW_EVENT_HTML_MESSAGE,   DW_SIGNAL_HTML_MESSAGE },
+        { 0,                        "" }
 };
 
 #define _DW_EVENT_PARAM_SIZE 10
+
+void _dw_render_create_bitmap(HWND handle);
+void _dw_render_finish_draw(HWND handle);
+
 
 int _dw_event_handler2(void **params)
 {
@@ -358,7 +363,11 @@ int _dw_event_handler2(void **params)
                 exp.y = DW_POINTER_TO_INT(params[4]);
                 exp.width = DW_POINTER_TO_INT(params[5]);
                 exp.height = DW_POINTER_TO_INT(params[6]);
+                if(_dw_render_safe_mode)
+                    _dw_render_create_bitmap(handler->window);
                 retval = exposefunc(handler->window, &exp, handler->data);
+                if(_dw_render_safe_mode)
+                    _dw_render_finish_draw(handler->window);
                 /* Return here so we don't free params since we
                  * are always handling expose/draw on the UI thread.
                  */
@@ -475,34 +484,57 @@ int _dw_event_handler2(void **params)
                     free(uri);
                 break;
             }
+                /* HTML message event */
+            case _DW_EVENT_HTML_MESSAGE:
+            {
+                int (* API htmlmessagefunc)(HWND, char *, char *, void *) = (int (* API)(HWND, char *, char *, void *))handler->signalfunction;
+                char *name = (char *)params[1];
+                char *body = (char *)params[2];
+
+                retval = htmlmessagefunc(handler->window, name, body, handler->data);
+                if(name)
+                    free(name);
+                if(body)
+                    free(body);
+                break;
+            }
         }
     }
     return retval;
 }
 
-/* We create a queue of events... the oldest event indexed by
- * _dw_event_head, the newest by _dw_event_tail.
+/* We create queues of events... the oldest event indexed by
+ * _dw_event_queue->head, the newest by _dw_event_queue->tail.
  */
-#define _DW_EVENT_QUEUE_LENGTH 10
-void *_dw_event_queue[_DW_EVENT_QUEUE_LENGTH][_DW_EVENT_PARAM_SIZE];
-int _dw_event_head = -1, _dw_event_tail = -1, _dw_main_active = TRUE;
-HMTX _dw_event_mutex = nullptr;
+#define _DW_EVENT_QUEUE_LENGTH 50
+
+typedef struct
+{
+    int head, tail;
+    HMTX mutex;
+    void *queue[_DW_EVENT_QUEUE_LENGTH][_DW_EVENT_PARAM_SIZE];
+} _dw_event_queue;
+
+/* Higher priority draw queue gets handled first */
+_dw_event_queue _dw_high = { -1, -1 };
+_dw_event_queue _dw_low = { -1, -1 };
+int _dw_main_active = TRUE;
 DWTID _dw_main_thread = -1;
 
 /* Add a new event to the queue if there is space.
  * This will be handled in the thread running dw_main()
  */
-int _dw_queue_event(void **params)
+int _dw_queue_event(void **params, _dw_event_queue *queue)
 {
-    int newtail = _dw_event_tail + 1;
+    int newtail = queue->tail + 1;
     int retval = FALSE;
 
     /* Initialize the mutex if necessary... return on failure. */
-    if(!_dw_event_mutex && !(_dw_event_mutex = dw_mutex_new()))
+    if(!queue->mutex && !(queue->mutex = dw_mutex_new()))
         return retval;
 
     /* Protect the queue in a mutex... hold for as short as possible */
-    while(dw_mutex_trylock(_dw_event_mutex) != DW_ERROR_NONE)
+    while(dw_mutex_trylock(queue->mutex) != DW_ERROR_NONE)
         sched_yield();
 
     /* If we are at the end of the queue, loop back to the start. */
@@ -511,19 +543,19 @@ int _dw_queue_event(void **params)
     /* If the new tail will be at the head, the event queue
      * if full... drop the event.
      */
-    if(newtail != _dw_event_head)
+    if(newtail != queue->head)
     {
         /* If the queue was empty, head and tail will be the same. */
-        if (_dw_event_head == -1)
-            _dw_event_head = newtail;
+        if (queue->head == -1)
+            queue->head = newtail;
         /* Copy the new event from the stack into the event queue. */
-        memcpy(&_dw_event_queue[newtail], params, _DW_EVENT_PARAM_SIZE * sizeof(void *));
+        memcpy(&queue->queue[newtail], params, _DW_EVENT_PARAM_SIZE * sizeof(void *));
         /* Update the tail index */
-        _dw_event_tail = newtail;
+        queue->tail = newtail;
         /* Successfully queued event */
         retval = TRUE;
     }
-    dw_mutex_unlock(_dw_event_mutex);
+    dw_mutex_unlock(queue->mutex);
     return retval;
 }
 
@@ -531,40 +563,40 @@ int _dw_queue_event(void **params)
  * advance the head and return TRUE.
  * If there are no events waiting return FALSE
  */
-int _dw_dequeue_event(void **params)
+int _dw_dequeue_event(void **params, _dw_event_queue *queue)
 {
     int retval = FALSE;
 
     /* Initialize the mutex if necessary... return FALSE on failure. */
-    if(!_dw_event_mutex && !(_dw_event_mutex = dw_mutex_new()))
+    if(!queue->mutex && !(queue->mutex = dw_mutex_new()))
         return retval;
-    dw_mutex_lock(_dw_event_mutex);
-    if(_dw_event_head != -1)
+    dw_mutex_lock(queue->mutex);
+    if(queue->head != -1)
     {
         /* Copy the params out of the queue so it can be filled in by new events */
-        memcpy(params, &_dw_event_queue[_dw_event_head], _DW_EVENT_PARAM_SIZE * sizeof(void *));
+        memcpy(params, &queue->queue[queue->head], _DW_EVENT_PARAM_SIZE * sizeof(void *));
 
         /* If the head is the same as the tail...
          * there was only one event... so set the
          * head and tail to -1 to indicate empty.
          */
-        if(_dw_event_head == _dw_event_tail)
-            _dw_event_head = _dw_event_tail = -1;
+        if(queue->head == queue->tail)
+            queue->head = queue->tail = -1;
         else
         {
             /* Advance the head */
-            _dw_event_head++;
+            queue->head++;
 
             /* If we are at the end of the queue, loop back to the start. */
-            if(_dw_event_head >= _DW_EVENT_QUEUE_LENGTH)
-                _dw_event_head = 0;
+            if(queue->head >= _DW_EVENT_QUEUE_LENGTH)
+                queue->head = 0;
         }
         /* Successfully dequeued event */
         retval = TRUE;
         /* Notify dw_main() that there is an event to handle */
         dw_event_post(_dw_main_event);
     }
-    dw_mutex_unlock(_dw_event_mutex);
+    dw_mutex_unlock(queue->mutex);
     return retval;
 }
 
@@ -577,14 +609,19 @@ int _dw_event_handler(jobject object, void **params)
     {
         params[9] = (void *)handler;
 
-        /* We have to handle draw events in the main thread...
-         * If it isn't a draw event, either queue the event
-         * or launch a new thread to handle it.
+        /* When we are not in safe rendering mode,
+         * We have to handle draw events in the main thread.
+         * If it isn't a draw event, queue the event.
          */
         if(DW_POINTER_TO_INT(params[8]) != _DW_EVENT_EXPOSE)
         {
             /* Push the new event onto the queue if it fits */
-            _dw_queue_event(params);
+            _dw_queue_event(params, &_dw_high);
+        }
+        else if(_dw_render_safe_mode == DW_FEATURE_ENABLED)
+        {
+            /* Push the new event onto the high priority queue if it fits */
+            _dw_queue_event(params, &_dw_low);
         }
         else
             return _dw_event_handler2(params);
@@ -665,6 +702,28 @@ Java_org_dbsoft_dwindows_DWWebViewClient_eventHandlerHTMLChanged(JNIEnv* env, jo
     if(uri)
         env->ReleaseStringUTFChars(URI, uri);
 }
+
+JNIEXPORT void JNICALL
+Java_org_dbsoft_dwindows_DWWebViewInterface_eventHandlerHTMLMessage(JNIEnv *env, jobject thiz,
+                                                                    jobject obj1, jint message,
+                                                                    jstring htmlName, jstring htmlBody) {
+    const char *name = env->GetStringUTFChars(htmlName, nullptr);
+    const char *body = env->GetStringUTFChars(htmlBody, nullptr);
+    void *params[_DW_EVENT_PARAM_SIZE] = { nullptr, DW_POINTER(name ? strdup(name) : nullptr),
+                                           DW_POINTER(body ? strdup(body) : nullptr),
+                                           nullptr, nullptr, nullptr, nullptr, nullptr,
+                                           DW_INT_TO_POINTER(message), nullptr };
+
+    // This seems callback seems to run on an uninitialized thread...
+    pthread_setspecific(_dw_env_key, env);
+
+    _dw_event_handler(obj1, params);
+    if(name)
+        env->ReleaseStringUTFChars(htmlName, name);
+    if(body)
+        env->ReleaseStringUTFChars(htmlBody, body);
+}
+
 
 typedef struct _dwprint
 {
@@ -885,12 +944,13 @@ void _dw_new_signal(ULONG message, HWND window, int msgid, void *signalfunction,
 /* Finds the message number for a given signal name */
 ULONG _dw_findsigmessage(const char *signame)
 {
-    int z;
+    int z = 0;
 
-    for(z=0;z<SIGNALMAX;z++)
+    while(DWSignalTranslate[z].message)
     {
         if(strcasecmp(signame, DWSignalTranslate[z].name) == 0)
             return DWSignalTranslate[z].message;
+        z++;
     }
     return 0L;
 }
@@ -980,12 +1040,20 @@ void API dw_main(void)
     do
     {
         void *params[_DW_EVENT_PARAM_SIZE];
+        int result;
 
         dw_event_reset(_dw_main_event);
 
-        /* Dequeue and handle any pending events */
-        while(_dw_dequeue_event(params))
-            _dw_event_handler2(params);
+        /* Dequeue and handle any pending events,
+         * always checking for high events first.
+         */
+        do
+        {
+            if((result = _dw_dequeue_event(params, &_dw_high)))
+                _dw_event_handler2(params);
+            else if((result = _dw_dequeue_event(params, &_dw_low)))
+                _dw_event_handler2(params);
+        } while(result);
 
         /* Wait for something to wake us up,
          * either a posted event, or dw_main_quit()
@@ -1028,12 +1096,20 @@ void API dw_main_sleep(int milliseconds)
         do
         {
             void *params[_DW_EVENT_PARAM_SIZE];
+            int result;
 
             dw_event_reset(_dw_main_event);
 
-            /* Dequeue and handle any pending events */
-            while(_dw_dequeue_event(params))
-                _dw_event_handler2(params);
+            /* Dequeue and handle any pending events,
+             * always checking for high events first.
+             */
+            do
+            {
+                if((result = _dw_dequeue_event(params, &_dw_high)))
+                    _dw_event_handler2(params);
+                else if((result = _dw_dequeue_event(params, &_dw_low)))
+                    _dw_event_handler2(params);
+            } while(result);
 
             /* Wait for something to wake us up,
              * either a posted event, or dw_main_quit()
@@ -1066,8 +1142,10 @@ void API dw_main_iteration(void)
     {
         void *params[_DW_EVENT_PARAM_SIZE];
 
-        /* Dequeue a single pending event */
-        if (_dw_dequeue_event(params))
+        /* Dequeue a single pending event, try high first */
+        if (_dw_dequeue_event(params, &_dw_high))
+            _dw_event_handler2(params);
+        else if (_dw_dequeue_event(params, &_dw_low))
             _dw_event_handler2(params);
     }
     else
@@ -3088,12 +3166,49 @@ void API dw_render_redraw(HWND handle)
         jclass clazz = _dw_find_class(env, DW_CLASS_NAME);
         // Get the method that you want to call
         jmethodID renderRedraw = env->GetMethodID(clazz, "renderRedraw",
-                                                  "(Lorg/dbsoft/dwindows/DWRender;)V");
+                                                  "(Lorg/dbsoft/dwindows/DWRender;I)V");
         // Call the method on the object
-        env->CallVoidMethod(_dw_obj, renderRedraw, handle);
+        env->CallVoidMethod(_dw_obj, renderRedraw, handle, (jint)_dw_render_safe_mode);
         _dw_jni_check_exception(env);
     }
 }
+
+/* Internal function to create backing bitmap */
+void _dw_render_create_bitmap(HWND handle)
+{
+    JNIEnv *env;
+
+    if(handle && (env = (JNIEnv *)pthread_getspecific(_dw_env_key)))
+    {
+        // First get the class that contains the method you need to call
+        jclass clazz = _dw_find_class(env, DW_CLASS_NAME);
+        // Get the method that you want to call
+        jmethodID renderCreateBitmap = env->GetMethodID(clazz, "renderCreateBitmap",
+                                                  "(Lorg/dbsoft/dwindows/DWRender;)V");
+        // Call the method on the object
+        env->CallVoidMethod(_dw_obj, renderCreateBitmap, handle);
+        _dw_jni_check_exception(env);
+    }
+}
+
+/* Internal function to trigger a redraw using the backing bitmap */
+void _dw_render_finish_draw(HWND handle)
+{
+    JNIEnv *env;
+
+    if(handle && (env = (JNIEnv *)pthread_getspecific(_dw_env_key)))
+    {
+        // First get the class that contains the method you need to call
+        jclass clazz = _dw_find_class(env, DW_CLASS_NAME);
+        // Get the method that you want to call
+        jmethodID renderFinishDraw = env->GetMethodID(clazz, "renderFinishDraw",
+                                                        "(Lorg/dbsoft/dwindows/DWRender;)V");
+        // Call the method on the object
+        env->CallVoidMethod(_dw_obj, renderFinishDraw, handle);
+        _dw_jni_check_exception(env);
+    }
+}
+
 
 /* Sets the current foreground drawing color.
  * Parameters:
@@ -4989,6 +5104,24 @@ void API dw_pixmap_destroy(HPIXMAP pixmap)
 }
 
 /*
+ * Returns the width of the pixmap, same as the DW_PIXMAP_WIDTH() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_width(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->width : 0;
+}
+
+/*
+ * Returns the height of the pixmap, same as the DW_PIXMAP_HEIGHT() macro,
+ * but exported as an API, for non-C language bindings.
+ */
+unsigned long API dw_pixmap_get_height(HPIXMAP pixmap)
+{
+    return pixmap ? pixmap->height : 0;
+}
+
+/*
  * Copies from one item to another.
  * Parameters:
  *       dest: Destination window handle.
@@ -5175,7 +5308,7 @@ int API dw_html_raw(HWND handle, const char *string)
     JNIEnv *env;
     int retval = DW_ERROR_GENERAL;
 
-    if(handle && (env = (JNIEnv *)pthread_getspecific(_dw_env_key)))
+    if(handle && string && (env = (JNIEnv *)pthread_getspecific(_dw_env_key)))
     {
         // Construct a String
         jstring jstr = env->NewStringUTF(string);
@@ -5207,7 +5340,7 @@ int API dw_html_url(HWND handle, const char *url)
     JNIEnv *env;
     int retval = DW_ERROR_GENERAL;
 
-    if(handle && (env = (JNIEnv *)pthread_getspecific(_dw_env_key)))
+    if(handle && url && (env = (JNIEnv *)pthread_getspecific(_dw_env_key)))
     {
         // Construct a String
         jstring jstr = env->NewStringUTF(url);
@@ -5240,7 +5373,7 @@ int API dw_html_javascript_run(HWND handle, const char *script, void *scriptdata
     JNIEnv *env;
     int retval = DW_ERROR_GENERAL;
 
-    if(handle && (env = (JNIEnv *)pthread_getspecific(_dw_env_key)))
+    if(handle && script && (env = (JNIEnv *)pthread_getspecific(_dw_env_key)))
     {
         // Construct a String
         jstring jstr = env->NewStringUTF(script);
@@ -5251,6 +5384,38 @@ int API dw_html_javascript_run(HWND handle, const char *script, void *scriptdata
                                                        "(Landroid/webkit/WebView;Ljava/lang/String;J)V");
         // Call the method on the object
         env->CallVoidMethod(_dw_obj, htmlJavascriptRun, handle, jstr, (jlong)scriptdata);
+        if(!_dw_jni_check_exception(env))
+            retval = DW_ERROR_NONE;
+        env->DeleteLocalRef(jstr);
+    }
+    return retval;
+}
+
+/*
+ * Install a javascript function with name that can call native code.
+ * Parameters:
+ *       handle: Handle to the HTML window.
+ *       name: Javascript function name.
+ * Notes: A DW_SIGNAL_HTML_MESSAGE event will be raised with scriptdata.
+ * Returns:
+ *       DW_ERROR_NONE (0) on success.
+ */
+int API dw_html_javascript_add(HWND handle, const char *name)
+{
+    JNIEnv *env;
+    int retval = DW_ERROR_UNKNOWN;
+
+    if(handle && name && (env = (JNIEnv *)pthread_getspecific(_dw_env_key)))
+    {
+        // Construct a String
+        jstring jstr = env->NewStringUTF(name);
+        // First get the class that contains the method you need to call
+        jclass clazz = _dw_find_class(env, DW_CLASS_NAME);
+        // Get the method that you want to call
+        jmethodID htmlJavascriptAdd = env->GetMethodID(clazz, "htmlJavascriptAdd",
+                                                       "(Landroid/webkit/WebView;Ljava/lang/String;)V");
+        // Call the method on the object
+        env->CallVoidMethod(_dw_obj, htmlJavascriptAdd, handle, jstr);
         if(!_dw_jni_check_exception(env))
             retval = DW_ERROR_NONE;
         env->DeleteLocalRef(jstr);
@@ -6104,11 +6269,11 @@ int API dw_window_destroy(HWND handle)
 char * API dw_window_get_text(HWND handle)
 {
     JNIEnv *env;
+    char *retval = nullptr;
 
     if((env = (JNIEnv *)pthread_getspecific(_dw_env_key)))
     {
         const char *utf8 = nullptr;
-        char *retval = nullptr;
 
         // First get the class that contains the method you need to call
         jclass clazz = _dw_find_class(env, DW_CLASS_NAME);
@@ -6126,7 +6291,7 @@ char * API dw_window_get_text(HWND handle)
             env->ReleaseStringUTFChars(result, utf8);
         }
     }
-    return nullptr;
+    return retval;
 }
 
 /*
@@ -8116,6 +8281,7 @@ int API dw_feature_get(DWFEATURE feature)
     {
         case DW_FEATURE_HTML:                    /* Supports the HTML Widget */
         case DW_FEATURE_HTML_RESULT:             /* Supports the DW_SIGNAL_HTML_RESULT callback */
+        case DW_FEATURE_HTML_MESSAGE:            /* Supports the DW_SIGNAL_HTML_MESSAGE callback */
         case DW_FEATURE_NOTIFICATION:            /* Supports sending system notifications */
         case DW_FEATURE_UTF8_UNICODE:            /* Supports UTF8 encoded Unicode text */
         case DW_FEATURE_MLE_WORD_WRAP:           /* Supports word wrapping in Multi-line Edit boxes */
@@ -8124,6 +8290,8 @@ int API dw_feature_get(DWFEATURE feature)
             return DW_FEATURE_ENABLED;
         case DW_FEATURE_CONTAINER_MODE:          /* Supports alternate container view modes */
             return _dw_container_mode;
+        case DW_FEATURE_RENDER_SAFE:             /* Supports render safe drawing mode, limited to expose */
+            return _dw_render_safe_mode;
         case DW_FEATURE_DARK_MODE:               /* Supports Dark Mode user interface */
         {
             /* Dark Mode on Android requires Android 10 (API 29) */
@@ -8157,6 +8325,7 @@ int API dw_feature_set(DWFEATURE feature, int state)
         /* These features are supported but not configurable */
         case DW_FEATURE_HTML:                    /* Supports the HTML Widget */
         case DW_FEATURE_HTML_RESULT:             /* Supports the DW_SIGNAL_HTML_RESULT callback */
+        case DW_FEATURE_HTML_MESSAGE:            /* Supports the DW_SIGNAL_HTML_MESSAGE callback */
         case DW_FEATURE_NOTIFICATION:            /* Supports sending system notifications */
         case DW_FEATURE_UTF8_UNICODE:            /* Supports UTF8 encoded Unicode text */
         case DW_FEATURE_MLE_WORD_WRAP:           /* Supports word wrapping in Multi-line Edit boxes */
@@ -8164,6 +8333,15 @@ int API dw_feature_set(DWFEATURE feature, int state)
         case DW_FEATURE_TREE:                    /* Supports the Tree Widget */
             return DW_ERROR_GENERAL;
         /* These features are supported and configurable */
+        case DW_FEATURE_RENDER_SAFE:             /* Supports render safe drawing mode, limited to expose */
+        {
+            if (state == DW_FEATURE_ENABLED || state == DW_FEATURE_DISABLED)
+            {
+                _dw_render_safe_mode = state;
+                return DW_ERROR_NONE;
+            }
+            return DW_ERROR_GENERAL;
+        }
         case DW_FEATURE_CONTAINER_MODE:          /* Supports alternate container view modes */
         {
             if(state >= DW_CONTAINER_MODE_DEFAULT && state < DW_CONTAINER_MODE_MAX)
